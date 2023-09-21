@@ -690,6 +690,47 @@ const controller = {
   },
 
   /**
+   * @function destroyObject
+   * Deletes the object
+   * @param {object} req Express request object
+   * @param {object} res Express response object
+   * @param {function} next The next callback function
+   * @returns {function} Express middleware function
+   */
+  async destroyObject(req, res, next) {
+    try {
+      const objId = addDashesToUuid(req.params.objectId);
+      const userId = await userService.getCurrentUserId(getCurrentIdentity(req.currentUser, SYSTEM_USER));
+
+      // loop through all versions & delete each one
+      const versions = await versionService.list(objId);
+
+      for (var i = 0; i < versions.length; i++) {
+
+        const data = {
+          bucketId: req.currentObject?.bucketId,
+          filePath: req.currentObject?.path,
+          s3VersionId: versions[i].s3VersionId
+        };
+
+        // delete version on S3
+        await storageService.deleteObject(data);
+
+        // delete version in DB
+        await versionService.delete(objId, versions[i].s3VersionId, userId);
+
+          // prune tags amd metadata
+        await metadataService.pruneOrphanedMetadata();
+        await tagService.pruneOrphanedTags();
+      }
+      const response = await objectService.delete(objId);
+      res.status(200).json(response);
+    } catch (e) {
+      next(errorToProblem(SERVICE, e));
+    }
+  },
+
+  /**
    * @function fetchMetadata
    * Fetch metadata for specific objects
    * @param {object} req Express request object
