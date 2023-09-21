@@ -9,7 +9,6 @@
     "build": "echo Nothing to build",
     "serve": "nodemon ./bin/www",
     "start": "node ./bin/www",
-    "debug": "nodemon --inspect ./bin/www",
     "test": "jest --verbose --forceExit --detectOpenHandles",
     "lint": "eslint . **/www --no-fix --ignore-pattern 'node_modules' --ext .js",
     "lint:fix": "eslint . **/www --fix --ignore-pattern 'node_modules' --ext .js",
