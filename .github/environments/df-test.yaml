@@ -9,7 +9,8 @@ image:
 
 autoscaling:
   enabled: true
-  maxReplicas: 2
+  minReplicas: 1
+  maxReplicas: 3
 
 config:
   enabled: true
