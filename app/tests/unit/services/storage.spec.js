@@ -8,7 +8,6 @@ const {
   GetObjectTaggingCommand,
   HeadBucketCommand,
   HeadObjectCommand,
-  ListObjectsCommand,
   ListObjectsV2Command,
   ListObjectVersionsCommand,
   PutBucketEncryptionCommand,
@@ -537,38 +536,142 @@ describe('listAllObjects', () => {
   });
 });
 
-describe('listObjects', () => {
+describe('listAllObjectVersions', () => {
+  const listObjectVersionMock = jest.spyOn(service, 'listObjectVersion');
+  const bucketId = 'abc';
+
   beforeEach(() => {
-    s3ClientMock.on(ListObjectsCommand).resolves({});
+    listObjectVersionMock.mockReset();
   });
 
-  it('should send a list objects command with default undefined maxKeys', async () => {
-    const filePath = 'filePath';
-    const result = await service.listObjects({ filePath });
-
-    expect(result).toBeTruthy();
-    expect(utils.getBucket).toHaveBeenCalledTimes(1);
-    expect(s3ClientMock).toHaveReceivedCommandTimes(ListObjectsCommand, 1);
-    expect(s3ClientMock).toHaveReceivedCommandWith(ListObjectsCommand, {
-      Bucket: bucket,
-      Prefix: filePath,
-      MaxKeys: undefined
-    });
+  afterAll(() => {
+    listObjectVersionMock.mockRestore();
   });
 
-  it('should send a list objects command with 200 maxKeys', async () => {
-    const filePath = 'filePath';
-    const maxKeys = 200;
-    const result = await service.listObjects({ filePath, maxKeys });
+  it('should call listObjectVersion at least once and yield empty arrays', async () => {
+    listObjectVersionMock.mockResolvedValue({ IsTruncated: false });
+
+    const result = await service.listAllObjectVersions({ filePath: '/' });
 
     expect(result).toBeTruthy();
+    expect(Array.isArray(result.DeleteMarkers)).toBeTruthy();
+    expect(result.DeleteMarkers).toHaveLength(0);
+    expect(Array.isArray(result.Versions)).toBeTruthy();
+    expect(result.Versions).toHaveLength(0);
+    expect(utils.getBucket).toHaveBeenCalledTimes(0);
+    expect(utils.isAtPath).toHaveBeenCalledTimes(0);
+    expect(listObjectVersionMock).toHaveBeenCalledTimes(1);
+    expect(listObjectVersionMock).toHaveBeenCalledWith(expect.objectContaining({
+      filePath: ''
+    }));
+  });
+
+  it('should call listObjectVersion at least once with bucket lookup and yield empty arrays', async () => {
+    utils.getBucket.mockResolvedValue({ key: key });
+    listObjectVersionMock.mockResolvedValue({ IsTruncated: false });
+
+    const result = await service.listAllObjectVersions({ bucketId: bucketId });
+
+    expect(result).toBeTruthy();
+    expect(Array.isArray(result.DeleteMarkers)).toBeTruthy();
+    expect(result.DeleteMarkers).toHaveLength(0);
+    expect(Array.isArray(result.Versions)).toBeTruthy();
+    expect(result.Versions).toHaveLength(0);
     expect(utils.getBucket).toHaveBeenCalledTimes(1);
-    expect(s3ClientMock).toHaveReceivedCommandTimes(ListObjectsCommand, 1);
-    expect(s3ClientMock).toHaveReceivedCommandWith(ListObjectsCommand, {
-      Bucket: bucket,
-      Prefix: filePath,
-      MaxKeys: maxKeys
-    });
+    expect(utils.getBucket).toHaveBeenCalledWith(bucketId);
+    expect(utils.isAtPath).toHaveBeenCalledTimes(0);
+    expect(listObjectVersionMock).toHaveBeenCalledTimes(1);
+    expect(listObjectVersionMock).toHaveBeenCalledWith(expect.objectContaining({
+      filePath: key,
+      bucketId: bucketId
+    }));
+  });
+
+  it('should call listObjectVersion multiple times and return precise path objects', async () => {
+    const nextKeyMarker = 'token';
+    listObjectVersionMock.mockResolvedValueOnce({ DeleteMarkers: [{ Key: 'filePath/foo' }], IsTruncated: true, NextKeyMarker: nextKeyMarker });
+    listObjectVersionMock.mockResolvedValueOnce({ Versions: [{ Key: 'filePath/bar' }], IsTruncated: false });
+
+    const result = await service.listAllObjectVersions({ filePath: 'filePath' });
+
+    expect(result).toBeTruthy();
+    expect(Array.isArray(result.DeleteMarkers)).toBeTruthy();
+    expect(result.DeleteMarkers).toHaveLength(1);
+    expect(result.DeleteMarkers).toEqual(expect.arrayContaining([
+      { Key: 'filePath/foo' }
+    ]));
+    expect(Array.isArray(result.Versions)).toBeTruthy();
+    expect(result.Versions).toHaveLength(1);
+    expect(result.Versions).toEqual(expect.arrayContaining([
+      { Key: 'filePath/bar' }
+    ]));
+    expect(utils.getBucket).toHaveBeenCalledTimes(0);
+    expect(utils.isAtPath).toHaveBeenCalledTimes(2);
+    expect(listObjectVersionMock).toHaveBeenCalledTimes(2);
+    expect(listObjectVersionMock).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      filePath: key
+    }));
+    expect(listObjectVersionMock).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      filePath: key,
+      keyMarker: nextKeyMarker
+    }));
+  });
+
+  it('should call listObjectVersion multiple times and return all path objects', async () => {
+    const nextKeyMarker = 'token';
+    listObjectVersionMock.mockResolvedValueOnce({ DeleteMarkers: [{ Key: 'filePath/test/foo' }], IsTruncated: true, NextKeyMarker: nextKeyMarker });
+    listObjectVersionMock.mockResolvedValueOnce({ Versions: [{ Key: 'filePath/test/bar' }], IsTruncated: false });
+
+    const result = await service.listAllObjectVersions({ filePath: 'filePath', precisePath: false });
+
+    expect(result).toBeTruthy();
+    expect(Array.isArray(result.DeleteMarkers)).toBeTruthy();
+    expect(result.DeleteMarkers).toHaveLength(1);
+    expect(result.DeleteMarkers).toEqual(expect.arrayContaining([
+      { Key: 'filePath/test/foo' }
+    ]));
+    expect(Array.isArray(result.Versions)).toBeTruthy();
+    expect(result.Versions).toHaveLength(1);
+    expect(result.Versions).toEqual(expect.arrayContaining([
+      { Key: 'filePath/test/bar' }
+    ]));
+    expect(utils.getBucket).toHaveBeenCalledTimes(0);
+    expect(utils.isAtPath).toHaveBeenCalledTimes(0);
+    expect(listObjectVersionMock).toHaveBeenCalledTimes(2);
+    expect(listObjectVersionMock).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      filePath: key
+    }));
+    expect(listObjectVersionMock).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      filePath: key,
+      keyMarker: nextKeyMarker
+    }));
+  });
+
+  it('should call listObjectVersion multiple times and return all latest path objects', async () => {
+    const nextKeyMarker = 'token';
+    listObjectVersionMock.mockResolvedValueOnce({ DeleteMarkers: [{ Key: 'filePath/test/foo', IsLatest: true }], IsTruncated: true, NextKeyMarker: nextKeyMarker });
+    listObjectVersionMock.mockResolvedValueOnce({ Versions: [{ Key: 'filePath/test/bar', IsLatest: false }], IsTruncated: false });
+
+    const result = await service.listAllObjectVersions({ filePath: 'filePath', precisePath: false, filterLatest: true });
+
+    expect(result).toBeTruthy();
+    expect(Array.isArray(result.DeleteMarkers)).toBeTruthy();
+    expect(result.DeleteMarkers).toHaveLength(1);
+    expect(result.DeleteMarkers).toEqual(expect.arrayContaining([
+      { Key: 'filePath/test/foo', IsLatest: true }
+    ]));
+    expect(Array.isArray(result.Versions)).toBeTruthy();
+    expect(result.Versions).toHaveLength(0);
+    expect(utils.getBucket).toHaveBeenCalledTimes(0);
+    expect(utils.isAtPath).toHaveBeenCalledTimes(0);
+    expect(listObjectVersionMock).toHaveBeenCalledTimes(2);
+    expect(listObjectVersionMock).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      filePath: key
+    }));
+    expect(listObjectVersionMock).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      filePath: key,
+      keyMarker: nextKeyMarker
+    }));
   });
 });
 
@@ -684,18 +787,12 @@ describe('putBucketEncryption', () => {
 });
 
 describe('putObject', () => {
-  const getPathSpy = jest.spyOn(utils, 'getPath');
   const name = 'foo.txt';
   const keyPath = utils.joinPath(key, name);
   const length = 123;
 
   beforeEach(() => {
-    getPathSpy.mockResolvedValue(keyPath);
     s3ClientMock.on(PutObjectCommand).resolves({});
-  });
-
-  afterAll(() => {
-    getPathSpy.mockRestore();
   });
 
   it('should send a put object command', async () => {
@@ -899,12 +996,9 @@ describe('readSignedUrl', () => {
 });
 
 describe('upload', () => {
-  const getPathSpy = jest.spyOn(utils, 'getPath');
   const id = 'id';
-  const keyPath = utils.joinPath(key, id);
 
   beforeEach(() => {
-    getPathSpy.mockResolvedValue(keyPath);
     s3ClientMock.on(PutObjectCommand).resolves({});
     s3ClientMock.on(PutObjectTaggingCommand).resolves({});
   });
