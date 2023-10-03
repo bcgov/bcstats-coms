@@ -28,6 +28,14 @@ autoscaling:
           periodSeconds: 30
   targetCPUUtilizationPercentage: 80
 
+resources:
+  limits:
+    cpu: 200m
+    memory: 512Mi
+  requests:
+    cpu: 50m
+    memory: 128Mi
+
 config:
   enabled: true
   releaseScoped: true
