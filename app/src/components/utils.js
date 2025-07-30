@@ -17,7 +17,8 @@ const utils = {
    */
   addDashesToUuid(str) {
     if ((typeof str === 'string' || str instanceof String) && str.length === 32) {
-      return `${str.slice(0, 8)}-${str.slice(8, 12)}-${str.slice(12, 16)}-${str.slice(16, 20)}-${str.slice(20)}`.toLowerCase();
+      return `${str.slice(0, 8)}-${str.slice(8, 12)}-${str.slice(12, 16)}-${str.slice(16, 20)}-${str.slice(20)}`
+        .toLowerCase();
     }
     else return str;
   },
@@ -50,13 +51,30 @@ const utils = {
    * @returns {string} The application AuthMode
    */
   getAppAuthMode() {
-    const basicAuth = config.has('basicAuth.enabled');
-    const oidcAuth = config.has('keycloak.enabled');
+    const basicAuth = utils.getConfigBoolean('basicAuth.enabled');
+    const oidcAuth = utils.getConfigBoolean('keycloak.enabled');
+    const s3AccessMode = utils.getConfigBoolean('basicAuth.s3AccessMode');
 
-    if (!basicAuth && !oidcAuth) return AuthMode.NOAUTH;
-    else if (basicAuth && !oidcAuth) return AuthMode.BASICAUTH;
-    else if (!basicAuth && oidcAuth) return AuthMode.OIDCAUTH;
+    if (!basicAuth && !oidcAuth && !s3AccessMode) return AuthMode.NOAUTH;
+    else if ((basicAuth || !s3AccessMode) && !oidcAuth) return AuthMode.BASICAUTH;
+    else if (!basicAuth && oidcAuth && !s3AccessMode) return AuthMode.OIDCAUTH;
     else return AuthMode.FULLAUTH; // basicAuth && oidcAuth
+  },
+
+  /**
+   * @function formatS3KeyForCompare
+   * Format S3 key-prefixes for comparison with bucket.key in COMS db
+   * @param {string} k S3 key prefix. example: photos/docs/
+   * @returns {string} provided key prefix without trailing slash
+   */
+  formatS3KeyForCompare(k) {
+    let key = k.substr(0, k.lastIndexOf('/')); // remove trailing slash and file name
+    return key || '/'; // set empty key to '/' to match convention in COMS db
+  },
+
+  hasOnlyPermittedKeys(obj, permittedKeys) {
+    const objKeys = Object.keys(obj);
+    return objKeys.every(key => permittedKeys.includes(key));
   },
 
   /**
@@ -82,7 +100,7 @@ const utils = {
         data.key = bucketData.key;
         data.secretAccessKey = bucketData.secretAccessKey;
         if (bucketData.region) data.region = bucketData.region;
-      } else if (config.has('objectStorage') && config.has('objectStorage.enabled')) {
+      } else if (utils.getConfigBoolean('objectStorage.enabled')) {
         data.accessKeyId = config.get('objectStorage.accessKeyId');
         data.bucket = config.get('objectStorage.bucket');
         data.endpoint = config.get('objectStorage.endpoint');
@@ -122,9 +140,34 @@ const utils = {
   },
 
   /**
+   * @function getConfigBoolean
+   * Gets the value of a boolean node-config key.
+   * Keys that don't exist in the config are automatically converted to `false`,
+   * thus avoiding the need to either call `config.has()` first, or wrap `config.get()`
+   * inside a try-catch block every time.
+   * @param {string} key the configuration value to look up. Must be either true, false, or not exist in the config.
+   * @returns {boolean} `true` if key exists in config and is true, `false` otherwise
+   */
+  getConfigBoolean(key) {
+    try {
+      const getConfig = config.get(key);
+
+      // isTruthy() can't handle undefined / null, so we have to do that here
+      // @see {@link https://github.com/node-config/node-config/wiki/Common-Usage#using-config-values}
+      if (getConfig === undefined || getConfig === null) return false;
+      else return utils.isTruthy(getConfig);
+    }
+    catch {
+      return false;
+    }
+  },
+
+  /**
    * @function getCurrentIdentity
    * Attempts to acquire current identity value.
    * Always takes first non-default value available. Yields `defaultValue` otherwise.
+   * looks for one of the specified claims (eg idir_user_guid,bceid_user_guid or github_id)
+   * if not found, returns 'sub' claim
    * @param {object} currentUser The express request currentUser object
    * @param {string} [defaultValue=undefined] An optional default return value
    * @returns {string} The current user identifier if applicable, or `defaultValue`
@@ -248,6 +291,16 @@ const utils = {
   },
 
   /**
+   * @function getUniqueObjects
+   * @param {object[]} arr array of objects
+   * @param {string} key key of object property whose value we are comparing
+   * @returns array of unique objects based on value of a given property
+   */
+  getUniqueObjects(array, key) {
+    return [...new Map(array.map(item => [item[key], item])).values()];
+  },
+
+  /**
    * @function groupByObject
    * Re-structure array of nested objects
    * @see {@link https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/reduce#grouping_objects_by_a_property}
@@ -277,7 +330,7 @@ const utils = {
 
   /**
    * @function isAtPath
-   * Predicate function determining if the `path` is a member of the `prefix` path
+   * Predicate function determining if the `path` is a non-directory member of the `prefix` path
    * @param {string} prefix The base "folder"
    * @param {string} path The "file" to check
    * @returns {boolean} True if path is member of prefix. False in all other cases.
@@ -285,6 +338,25 @@ const utils = {
   isAtPath(prefix, path) {
     if (typeof prefix !== 'string' || typeof path !== 'string') return false;
     if (prefix === path) return true; // Matching strings are always at the at the path
+    if (path.endsWith(DELIMITER)) return false; // Trailing slashes references the folder
+
+    const pathParts = path.split(DELIMITER).filter(part => part);
+    const prefixParts = prefix.split(DELIMITER).filter(part => part);
+    return prefixParts.every((part, i) => pathParts[i] === part)
+      && pathParts.filter(part => !prefixParts.includes(part)).length === 1;
+  },
+
+  /**
+   * @function isPrefixOfPath
+   * Predicate function determining if the `path` is a member of or equal to the `prefix` path
+   * @param {string} prefix The base "folder"
+   * @param {string} path The "file" to check
+   * @returns {boolean} True if path is member of prefix. False in all other cases.
+   */
+  isPrefixOfPath(prefix, path) {
+    if (typeof prefix !== 'string' || typeof path !== 'string') return false;
+    // path `/photos/holiday/` (represents a folder) and should be an objects in bucket with key `/photos/holiday`
+    if (prefix === path || prefix + DELIMITER === path) return true;
 
     const pathParts = path.split(DELIMITER).filter(part => part);
     const prefixParts = prefix.split(DELIMITER).filter(part => part);

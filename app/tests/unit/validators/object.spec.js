@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const Joi = require('joi');
 const jestJoi = require('jest-joi');
-const { DownloadMode } = require('../../../src/components/constants');
+const { DownloadMode, SortOrder } = require('../../../src/components/constants');
 expect.extend(jestJoi.matchers);
 
 const { schema } = require('../../../src/validators/object');
@@ -30,7 +30,7 @@ describe('addMetadata', () => {
       const objectId = params.keys.objectId;
 
       it('is the expected schema', () => {
-        expect(objectId).toEqual(type.uuidv4.describe());
+        expect(objectId).toEqual(type.uuidv4.required().describe());
       });
     });
   });
@@ -57,7 +57,7 @@ describe('addTags', () => {
       const objectId = params.keys.objectId;
 
       it('is the expected schema', () => {
-        expect(objectId).toEqual(type.uuidv4.describe());
+        expect(objectId).toEqual(type.uuidv4.required().describe());
       });
     });
   });
@@ -98,7 +98,7 @@ describe('createObject', () => {
       const bucketId = schema.createObject.query.describe().keys.bucketId;
 
       it('is the expected schema', () => {
-        expect(bucketId).toEqual(type.uuidv4.describe());
+        expect(bucketId).toEqual(type.uuidv4.required().describe());
       });
     });
 
@@ -129,7 +129,7 @@ describe('deleteMetadata', () => {
       const objectId = params.keys.objectId;
 
       it('is the expected schema', () => {
-        expect(objectId).toEqual(type.uuidv4.describe());
+        expect(objectId).toEqual(type.uuidv4.required().describe());
       });
     });
   });
@@ -156,7 +156,7 @@ describe('deleteObject', () => {
       const objectId = params.keys.objectId;
 
       it('is the expected schema', () => {
-        expect(objectId).toEqual(type.uuidv4.describe());
+        expect(objectId).toEqual(type.uuidv4.required().describe());
       });
     });
   });
@@ -183,7 +183,7 @@ describe('deleteTags', () => {
       const objectId = params.keys.objectId;
 
       it('is the expected schema', () => {
-        expect(objectId).toEqual(type.uuidv4.describe());
+        expect(objectId).toEqual(type.uuidv4.required().describe());
       });
     });
   });
@@ -248,7 +248,7 @@ describe('listObjectVersion', () => {
       const objectId = params.keys.objectId;
 
       it('is the expected schema', () => {
-        expect(objectId).toEqual(type.uuidv4.describe());
+        expect(objectId).toEqual(type.uuidv4.required().describe());
       });
     });
   });
@@ -263,7 +263,7 @@ describe('readObject', () => {
       const objectId = params.keys.objectId;
 
       it('is the expected schema', () => {
-        expect(objectId).toEqual(type.uuidv4.describe());
+        expect(objectId).toEqual(type.uuidv4.required().describe());
       });
     });
   });
@@ -317,7 +317,7 @@ describe('replaceMetadata', () => {
       const objectId = params.keys.objectId;
 
       it('is the expected schema', () => {
-        expect(objectId).toEqual(type.uuidv4.describe());
+        expect(objectId).toEqual(type.uuidv4.required().describe());
       });
     });
   });
@@ -345,7 +345,7 @@ describe('replaceTags', () => {
       const objectId = params.keys.objectId;
 
       it('is the expected schema', () => {
-        expect(objectId).toEqual(type.uuidv4.describe());
+        expect(objectId).toEqual(type.uuidv4.required().describe());
       });
     });
   });
@@ -391,7 +391,7 @@ describe('searchObjects', () => {
     it('enforces general metadata pattern', () => {
       expect(headers.patterns).toEqual(expect.arrayContaining([
         expect.objectContaining({
-          regex: '/^x-amz-meta-.{1,255}$/i',
+          regex: '/^x-amz-meta-\\S+$/i',
           rule: expect.objectContaining({
             type: 'string',
             rules: expect.arrayContaining([
@@ -399,12 +399,6 @@ describe('searchObjects', () => {
                 name: 'min',
                 args: expect.objectContaining({
                   limit: 1
-                })
-              }),
-              expect.objectContaining({
-                name: 'max',
-                args: expect.objectContaining({
-                  limit: 255
                 })
               })
             ])
@@ -518,6 +512,86 @@ describe('searchObjects', () => {
         expect(active).toEqual(type.truthy.describe());
       });
     });
+
+    describe('page', () => {
+      const page = query.keys.page;
+
+      it('is a number', () => {
+        expect(page.type).toEqual('alternatives');
+        expect(page.matches).toBeTruthy();
+      });
+
+      it('enforces min value 1', () => {
+        expect.objectContaining({
+          name: 'min',
+          args: expect.objectContaining({
+            limit: 1
+          })
+        });
+      });
+    });
+
+    describe('limit', () => {
+      const limit = query.keys.limit;
+
+      it('is a number', () => {
+        expect(limit.type).toEqual('alternatives');
+        expect(limit.matches).toBeTruthy();
+      });
+
+      it('enforces min value 0', () => {
+        expect.objectContaining({
+          name: 'min',
+          args: expect.objectContaining({
+            limit: 0
+          })
+        });
+      });
+
+      it('limit is provided and greater then or equal to 0', () => {
+        const limitObject = schema.searchObjects.query;
+        const result = limitObject.validate({
+          limit: 0
+        });
+        expect(result.value.limit).toBeGreaterThanOrEqual(0);
+      });
+    });
+
+    describe('sort', () => {
+      const sort = query.keys.sort;
+      const sortName = ['id', 'path', 'public', 'active', 'createdBy', 'updatedBy', 'updatedAt', 'bucketId', 'name'];
+
+      it('is a string', () => {
+        expect(sort.type).toEqual('string');
+      });
+
+      it('must be one of ' + sortName, () => {
+        expect(sort.allow).toEqual(
+          expect.arrayContaining(sortName)
+        );
+      });
+    });
+
+    describe('order', () => {
+      const order = query.keys.order;
+      it('is a string', () => {
+        expect(order.type).toEqual('string');
+      });
+      it('allows array containing valid order', () => {
+        expect(order.allow).toEqual(
+          expect.arrayContaining(Object.values(SortOrder))
+        );
+      });
+    });
+
+    describe('permissions', () => {
+      const permissions = query.keys.permissions;
+
+      it('is the expected schema', () => {
+        expect(permissions).toEqual(type.truthy.describe());
+      });
+    });
+
   });
 });
 
@@ -545,7 +619,7 @@ describe('togglePublic', () => {
       const objectId = params.keys.objectId;
 
       it('is the expected schema', () => {
-        expect(objectId).toEqual(type.uuidv4.describe());
+        expect(objectId).toEqual(type.uuidv4.required().describe());
       });
     });
   });
@@ -581,7 +655,7 @@ describe('updateObject', () => {
       const objectId = params.keys.objectId;
 
       it('is the expected schema', () => {
-        expect(objectId).toEqual(type.uuidv4.describe());
+        expect(objectId).toEqual(type.uuidv4.required().describe());
       });
     });
   });

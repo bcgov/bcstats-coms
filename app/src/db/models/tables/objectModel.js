@@ -78,51 +78,23 @@ class ObjectModel extends Timestamps(Model) {
       filterActive(query, value) {
         if (value !== undefined) query.where('object.active', value);
       },
-      filterMimeType(query, value) {
-        if (value) {
-          query
-            .withGraphJoined('version')
-            .whereIn('version.id', builder => {
-              builder.select('version.id')
-                .where('version.mimeType', 'ilike', `%${value}%`);
-            });
-        }
-      },
-      filterDeleteMarker(query, value) {
-        if (value !== undefined) {
-          query
-            .withGraphJoined('version')
-            .where('version.deleteMarker', value);
-        }
-      },
-      filterLatest(query, value) {
-        if (value !== undefined) {
-
-          query.withGraphJoined('version');
-          if (value) {
-            query.modifyGraph('version', builder => {
-              builder
-                .select('version.*')
-                .distinctOn('version.objectId')
-                .orderBy([
-                  { column: 'version.objectId' },
-                  { column: 'version.createdAt', order: 'desc' }
-                ]);
-            });
-          } else {
-            // TODO: Consider modifying graph to join on all versions except latest
-            const subquery = Version.query()
-              .select('version.id')
-              .distinctOn('objectId')
-              .orderBy([
-                { column: 'objectId' },
-                { column: 'version.createdAt', order: 'desc' }
-              ]);
-            query.whereNotIn('version.id', builder => {
-              builder.intersect(subquery);
-            });
-          }
-        }
+      filterVersionAttributes(query, mimeType, deleteMarker, isLatest, versionId, s3VersionId) {
+        query
+          .withGraphJoined('version')
+          .leftJoinRelated('version')
+          .modify(query => {
+            if (mimeType) {
+              query.where('version.mimeType', 'ilike', `%${mimeType}%`);
+            }
+            if (deleteMarker !== undefined) {
+              query.where('version.deleteMarker', deleteMarker);
+            }
+            if (isLatest !== undefined) {
+              query.where('version.isLatest', isLatest);
+            }
+            filterOneOrMany(query, versionId, 'version.id');
+            filterOneOrMany(query, s3VersionId, 'version.s3VersionId');
+          });
       },
       filterMetadataTag(query, value) {
         const subqueries = [];
@@ -152,6 +124,7 @@ class ObjectModel extends Timestamps(Model) {
         if (subqueries.length) {
           query
             .withGraphJoined('version')
+            .leftJoinRelated('version')
             .whereIn('version.id', builder => {
               builder.intersect(subqueries);
             });
@@ -163,6 +136,10 @@ class ObjectModel extends Timestamps(Model) {
       hasPermission(query, userId, permCode) {
         if (userId && permCode) {
           query
+            // withGraphFetched keep joining using default 'left join' operation,
+            // to fix default behavior we are adding extra joinOperation which seems to be working with
+            // corresponding JoinRelated
+            .withGraphFetched('[objectPermission, bucketPermission]', { joinOperation: 'fullOuterJoinRelated' })
             .fullOuterJoinRelated('[objectPermission, bucketPermission]')
             // wrap in WHERE to make contained clauses exclusive of root query
             .where(query => {
@@ -182,7 +159,15 @@ class ObjectModel extends Timestamps(Model) {
                     });
                 });
             });
+        } else {
+          query.withGraphFetched('objectPermission');
         }
+      },
+      pagination(query, page, limit) {
+        if (page && limit) query.page(page - 1, limit);
+      },
+      sortOrder(query, column, order = 'asc') {
+        if (column) query.orderBy(column, order);
       }
     };
   }
@@ -192,12 +177,13 @@ class ObjectModel extends Timestamps(Model) {
       type: 'object',
       required: ['id', 'path'],
       properties: {
-        id: { type: 'string', minLength: 1, maxLength: 255 },
+        id: { type: 'string', format: 'uuid' },
         path: { type: 'string', minLength: 1, maxLength: 1024 },
         public: { type: 'boolean' },
         active: { type: 'boolean' },
-        bucketId: { type: 'string', maxLength: 255, nullable: true },
+        bucketId: { type: 'string', format: 'uuid', nullable: true },
         name: { type: 'string', maxLength: 1024 },
+        lastSyncedDate: { type: ['string', 'null'], format: 'date-time' },
         ...stamps
       },
       additionalProperties: false

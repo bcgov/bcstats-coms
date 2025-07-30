@@ -48,8 +48,18 @@ class Bucket extends mixin(Model, [
       filterBucketName(query, value) {
         filterILike(query, value, 'bucket.bucketName');
       },
+      filterEndpoint(query, value) {
+        filterILike(query, value, 'bucket.endpoint');
+      },
       filterKey(query, value) {
         filterILike(query, value, 'bucket.key');
+      },
+      filterKeyIsChild(query, value) {
+        if (value && value !== '/') {
+          query.where('bucket.key', 'like', `${value}%`);
+        }
+        query
+          .where('bucket.key', '!=', value);
       },
       filterActive(query, value) {
         if (value !== undefined) query.where('bucket.active', value);
@@ -79,7 +89,7 @@ class Bucket extends mixin(Model, [
         'secretAccessKey'
       ],
       properties: {
-        bucketId: { type: 'string', minLength: 1, maxLength: 255 },
+        bucketId: { type: 'string', format: 'uuid' },
         bucketName: { type: 'string', minLength: 1, maxLength: 255 },
         accessKeyId: { type: 'string', minLength: 1, maxLength: 255 },
         bucket: { type: 'string', minLength: 1, maxLength: 255 },
@@ -88,6 +98,7 @@ class Bucket extends mixin(Model, [
         secretAccessKey: { type: 'string', minLength: 1, maxLength: 255 },
         region: { type: 'string', maxLength: 255 },
         active: { type: 'boolean' },
+        lastSyncRequestedDate: { type: ['string', 'null'], format: 'date-time' },
         ...stamps
       },
       additionalProperties: false

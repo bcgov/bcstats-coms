@@ -22,44 +22,44 @@ tags:
     description: Operations for managing S3 Bucket(s).
     externalDocs:
       url: >-
-        https://github.com/bcgov/common-object-management-service/wiki/Endpoint-Notes#bucket
+        https://developer.gov.bc.ca/docs/default/component/common-object-management-service/Endpoint-Notes/#bucket
   - name: Metadata
     description: Operations for managing Metadata for S3 Objects.
     externalDocs:
       url: >-
-        https://github.com/bcgov/common-object-management-service/wiki/Endpoint-Notes#metadata
+        https://developer.gov.bc.ca/docs/default/component/common-object-management-service/Endpoint-Notes/#metadata
   - name: Object
     description: Operations directly influencing an S3 Object.
     externalDocs:
       url: >-
-        https://github.com/bcgov/common-object-management-service/wiki/Endpoint-Notes#object
+        https://developer.gov.bc.ca/docs/default/component/common-object-management-service/Endpoint-Notes/#object
   - name: Permission
     description: Operations for managing S3 permissions.
     externalDocs:
       url: >-
-        https://github.com/bcgov/common-object-management-service/wiki/Endpoint-Notes#permission
+        https://developer.gov.bc.ca/docs/default/component/common-object-management-service/Endpoint-Notes/#permissions
   - name: Sync
     description: >-
       Operations for syncing existing buckets and objects. Ensures that external
       S3 modifications are eventually correctly tracked by COMS.
     externalDocs:
       url: >-
-        https://github.com/bcgov/common-object-management-service/wiki/Endpoint-Notes#sync
+        https://developer.gov.bc.ca/docs/default/component/common-object-management-service/Endpoint-Notes/#sync
   - name: Tagging
     description: Operations for managing Tags for S3 Objects.
     externalDocs:
       url: >-
-        https://github.com/bcgov/common-object-management-service/wiki/Endpoint-Notes#tag
+        https://developer.gov.bc.ca/docs/default/component/common-object-management-service/Endpoint-Notes/#tag
   - name: User
     description: Operations to list valid queryable users and identity providers.
     externalDocs:
       url: >-
-        https://github.com/bcgov/common-object-management-service/wiki/Endpoint-Notes#user
+        https://developer.gov.bc.ca/docs/default/component/common-object-management-service/Endpoint-Notes/#user
   - name: Version
     description: Operations to list object versions.
     externalDocs:
       url: >-
-        https://github.com/bcgov/common-object-management-service/wiki/Endpoint-Notes
+        hhttps://developer.gov.bc.ca/docs/default/component/common-object-management-service/Endpoint-Notes/#versions
 paths:
   /bucket:
     put:
@@ -67,9 +67,13 @@ paths:
       description: >-
         Creates a bucket record. Bucket should exist in S3. If the set of
         `bucket`, `endpoint` and `key` match an existing record, the user will
-        be added to that existing bucket with full permissions instead of
-        generating a new bucket record.
+        be added to that existing bucket with the provided permissions instead of
+        generating a new bucket record. This endpoint can be used to grant the current user
+        permission to upload to a new or existing bucket.
       operationId: createBucket
+      parameters:
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
       tags:
         - Bucket
       requestBody:
@@ -101,6 +105,8 @@ paths:
       tags:
         - Bucket
       parameters:
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
         - $ref: "#/components/parameters/Query-BucketId"
         - $ref: "#/components/parameters/Query-Active"
         - $ref: "#/components/parameters/Query-Key"
@@ -128,6 +134,8 @@ paths:
       tags:
         - Bucket
       parameters:
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
         - $ref: "#/components/parameters/Path-BucketId"
       responses:
         "204":
@@ -143,6 +151,8 @@ paths:
       tags:
         - Bucket
       parameters:
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
         - $ref: "#/components/parameters/Path-BucketId"
       responses:
         "200":
@@ -169,6 +179,8 @@ paths:
               items:
                 $ref: "#/components/schemas/Request-UpdateBucket"
       parameters:
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
         - $ref: "#/components/parameters/Path-BucketId"
       responses:
         "200":
@@ -186,19 +198,76 @@ paths:
     delete:
       summary: Deletes a bucket
       description: >-
-        Deletes the bucket record based on bucketId. This request does not
-        dispatch an S3 operation to request the deletion of the associated
-        bucket.
+        Deletes the bucket record (and child objects) from the COMS database, based on bucketId.
+        When calling this endpoint using OIDC token authentication, the user requires the `DELETE`
+        permission for the bucket.
+        Providing the `recursive` parameter will also delete all sub-folders.
+        The `recursive` option also requires the OIDC user to have the `DELETE` permission
+        on all of these sub-folders otherwise the entire operation will fail.
+        This request does not dispatch an S3 operation to request the deletion of the associated
+        bucket(s) or delete any objects in object storage, it simply 'de-registers' knowledge of the bucket/folder
+        and objects from the COMS system.
       operationId: deleteBucket
       tags:
         - Bucket
       parameters:
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
         - $ref: "#/components/parameters/Path-BucketId"
+        - $ref: "#/components/parameters/Query-Recursive"
       responses:
         "204":
           description: Returns no content success
         "403":
           $ref: "#/components/responses/Forbidden"
+        default:
+          $ref: "#/components/responses/Error"
+  /bucket/{bucketId}/child:
+    put:
+      summary: Creates a child bucket
+      description: >-
+        Creates a child bucket record relative to the parent bucket and copies
+        the majority of the credential values. Bucket should exist in S3. Current
+        user's permissions that exist on the parent bucket will be copied over to
+        the child bucket. if the child bucket already exists, the user will be
+        given manage permission to it. User requires `CREATE` permission on the parent
+        bucket to proceed.
+      operationId: createBucketChild
+      tags:
+        - Bucket
+      parameters:
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
+        - $ref: "#/components/parameters/Path-BucketId"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Request-CreateBucketChild"
+      responses:
+        "201":
+          description: Returns inserted DB child bucket record
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DB-Bucket"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          description: Unprocessable Content (Derived bucket key is too long)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Response-ValidationError"
+                  - type: object
+                    properties:
+                      key:
+                        type: string
+                        description: The derived bucket key
+                        example: foo/bar
         default:
           $ref: "#/components/responses/Error"
   /bucket/{bucketId}/sync:
@@ -207,14 +276,22 @@ paths:
       description: >-
         Synchronize the contents of an existing bucket with COMS so that it can
         track and manage the objects in it. This avoids the need to re-upload
-        preexisting files through the COMS API. This endpoint does not guarantee
+        pre-existing files through the COMS API. This endpoint does not guarantee
         immediately synchronized results. Synchronization latency will be
         affected by the remaining number of objects awaiting synchronization.
+        This endpoint updates the last known successful synchronization request
+        date when invoked.
+        The `recursive` option will optionally sync sub-folders.
+        Note: The current user (if using OIDC auth) will get the permissions they
+        already have on the parent applied to any NEW sub-folders created in COMS
       tags:
         - Sync
       operationId: syncBucket
       parameters:
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
         - $ref: "#/components/parameters/Path-BucketId"
+        - $ref: "#/components/parameters/Query-Recursive"
       responses:
         "202":
           $ref: "#/components/responses/AddedQueueLength"
@@ -238,6 +315,8 @@ paths:
         - Metadata
       parameters:
         - $ref: "#/components/parameters/Header-Metadata"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
       responses:
         "200":
           description: Returns an array of matching key/value pairs.
@@ -256,19 +335,22 @@ paths:
       summary: Creates an object
       description: >-
         Creates an object in the bucket specified with bucketId parameter or
-        default bucket configured. If COMS is running in either 'OIDC' or 'Full'
-        mode, any objects created with OIDC user authentication will have all
-        object permissions assigned to them by default. This endpoint will do a
-        best attempt effort to create the object as requested as long as it does
-        not already exist in the destination bucket and path. Existing objects
+        default bucket configured. The object will be toggled to private after
+        this operation. If COMS is running in either 'OIDC' or 'Full' mode, any
+        objects created with OIDC user authentication will have all object
+        permissions assigned to them by default. This endpoint will do a best
+        attempt effort to create the object as requested as long as it does not
+        already exist in the destination bucket and path. Existing objects
         should be managed with the updateObject endpoint instead.
       operationId: createObject
       tags:
         - Object
       parameters:
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
         - $ref: "#/components/parameters/Header-ContentDisposition"
         - $ref: "#/components/parameters/Header-ContentLength"
         - $ref: "#/components/parameters/Header-ContentType"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
         - $ref: "#/components/parameters/Header-Metadata"
         - $ref: "#/components/parameters/Query-TagSet"
         - in: query
@@ -308,7 +390,15 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Response-Conflict"
+                allOf:
+                  - $ref: "#/components/schemas/Response-Conflict"
+                  - type: object
+                    properties:
+                      existingObjectId:
+                        type: string
+                        format: uuid
+                        description: The ID of the existing object
+                        example: ac246e31-c807-496c-bc93-cd8bc2f1b2b4
         "411":
           $ref: "#/components/responses/LengthRequired"
         "413":
@@ -329,6 +419,8 @@ paths:
       tags:
         - Object
       parameters:
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
         - $ref: "#/components/parameters/Header-Metadata"
         - $ref: "#/components/parameters/Query-ObjectId"
         - $ref: "#/components/parameters/Query-BucketId"
@@ -340,6 +432,11 @@ paths:
         - $ref: "#/components/parameters/Query-MimeType"
         - $ref: "#/components/parameters/Query-Name"
         - $ref: "#/components/parameters/Query-TagSet"
+        - $ref: "#/components/parameters/Query-Permissions"
+        - $ref: "#/components/parameters/Query-Limit"
+        - $ref: "#/components/parameters/Query-Order"
+        - $ref: "#/components/parameters/Query-Page"
+        - $ref: "#/components/parameters/Query-Sort"
       responses:
         "200":
           description: Returns and array of objects
@@ -348,7 +445,38 @@ paths:
               schema:
                 type: array
                 items:
-                  $ref: "#/components/schemas/DB-Object"
+                  type: object
+                  allOf:
+                    - $ref: "#/components/schemas/DB-Object"
+                    - type: object
+                      properties:
+                        lastModifiedDate:
+                          type: string
+                          format: date-time
+                          description: >-
+                            The object creation date or the last modified date (as exposed
+                            by S3's `Last-Modified` header), whichever is the latest.
+                          example: "2022-03-11T23:19:16.343Z"
+                          default: null
+                        permissions:
+                          type: array
+                          description: >-
+                            An array of object permissions in the context of the
+                            current user. Yields an empty array if authenticated
+                            via Basic Auth. Property only present if queryparam
+                            `permissions=true` is in request.
+                          items:
+                            type: string
+                            description: An object permission
+                            example: READ
+          headers:
+            X-Total-Rows:
+              schema:
+                type: integer
+              description: >-
+                Total number of objects matching the search query independent of
+                pagination scope
+              required: true
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -367,6 +495,8 @@ paths:
       tags:
         - Object
       parameters:
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
         - $ref: "#/components/parameters/Path-ObjectId"
         - $ref: "#/components/parameters/Query-Download"
         - $ref: "#/components/parameters/Query-ExpiresIn"
@@ -429,6 +559,8 @@ paths:
       tags:
         - Object
       parameters:
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
         - $ref: "#/components/parameters/Path-ObjectId"
         - $ref: "#/components/parameters/Query-S3VersionId"
         - $ref: "#/components/parameters/Query-VersionId"
@@ -475,8 +607,10 @@ paths:
       tags:
         - Object
       parameters:
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
         - $ref: "#/components/parameters/Header-ContentLength"
         - $ref: "#/components/parameters/Header-ContentType"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
         - $ref: "#/components/parameters/Header-Metadata"
         - $ref: "#/components/parameters/Path-ObjectId"
         - $ref: "#/components/parameters/Query-TagSet"
@@ -531,6 +665,8 @@ paths:
       tags:
         - Object
       parameters:
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
         - $ref: "#/components/parameters/Path-ObjectId"
         - $ref: "#/components/parameters/Query-S3VersionId"
         - $ref: "#/components/parameters/Query-VersionId"
@@ -550,6 +686,34 @@ paths:
         default:
           $ref: "#/components/responses/Error"
   /object/{objectId}/version:
+    put:
+      summary: Copy a version to become latest
+      description: >-
+        Copies a previous version of an object and places on top of the version 'stack'.
+        If no version is provided to copy, the latest existing version is copied.
+      operationId: copyVersion
+      tags:
+        - Version
+      parameters:
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
+        - $ref: "#/components/parameters/Path-ObjectId"
+        - $ref: "#/components/parameters/Query-VersionId"
+      responses:
+        "201":
+          description: Returns details of the new version
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DB-Version"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        default:
+          $ref: "#/components/responses/Error"
     get:
       summary: List versions for an object
       description: >-
@@ -559,6 +723,8 @@ paths:
       tags:
         - Version
       parameters:
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
         - $ref: "#/components/parameters/Path-ObjectId"
       responses:
         "200":
@@ -579,12 +745,14 @@ paths:
     patch:
       summary: Sets the public flag of an object
       description: >-
-        Toggles the public property for an object. Sets public to false if
-        public query parameter is not specified.
+        Toggles the public property for an object and broadcasts to S3 ACL. Sets
+        public to false if public query parameter is not specified.
       operationId: togglePublic
       tags:
         - Object
       parameters:
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
         - $ref: "#/components/parameters/Path-ObjectId"
         - $ref: "#/components/parameters/Query-Public"
       responses:
@@ -606,11 +774,14 @@ paths:
       description: >-
         Creates a copy and new version of the object with the given metadata
         added to the object. Multiple Key/Value pairs can be provided in the
-        header for the metadata.
+        header for the metadata. The object will be toggled to private after
+        this operation.
       operationId: addMetadata
       tags:
         - Metadata
       parameters:
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
         - $ref: "#/components/parameters/Header-Metadata"
         - $ref: "#/components/parameters/Path-ObjectId"
         - $ref: "#/components/parameters/Query-S3VersionId"
@@ -631,11 +802,14 @@ paths:
       description: >-
         Creates a copy and new version of the object with the given metadata
         replacing the existing. Multiple Key/Value pairs can be provided in the
-        header for the metadata.
+        header for the metadata. The object will be toggled to private after
+        this operation.
       operationId: replaceMetadata
       tags:
         - Metadata
       parameters:
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
         - $ref: "#/components/parameters/Header-Metadata"
         - $ref: "#/components/parameters/Path-ObjectId"
         - $ref: "#/components/parameters/Query-S3VersionId"
@@ -663,6 +837,8 @@ paths:
       tags:
         - Metadata
       parameters:
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
         - $ref: "#/components/parameters/Header-Metadata"
         - $ref: "#/components/parameters/Path-ObjectId"
         - $ref: "#/components/parameters/Query-S3VersionId"
@@ -684,11 +860,15 @@ paths:
         (e.g. using an S3 client to upload a new version) are tracked by COMS.
         This endpoint does not guarantee immediately synchronized results.
         Synchronization latency will be affected by the remaining number of
-        objects awaiting synchronization.
+        objects awaiting synchronization. The `lastSyncedDate` attribute will be
+        asynchronously updated when it performs a successful synchronization
+        with the S3 bucket
       tags:
         - Sync
       operationId: syncObject
       parameters:
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
         - $ref: "#/components/parameters/Path-ObjectId"
       responses:
         "202":
@@ -717,6 +897,8 @@ paths:
       tags:
         - Tagging
       parameters:
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
         - $ref: "#/components/parameters/Path-ObjectId"
         - $ref: "#/components/parameters/Query-TagSet"
         - $ref: "#/components/parameters/Query-S3VersionId"
@@ -743,6 +925,8 @@ paths:
       tags:
         - Tagging
       parameters:
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
         - $ref: "#/components/parameters/Path-ObjectId"
         - $ref: "#/components/parameters/Query-TagSet"
         - $ref: "#/components/parameters/Query-S3VersionId"
@@ -768,6 +952,8 @@ paths:
       tags:
         - Tagging
       parameters:
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
         - $ref: "#/components/parameters/Path-ObjectId"
         - $ref: "#/components/parameters/Query-TagSet"
         - $ref: "#/components/parameters/Query-S3VersionId"
@@ -793,6 +979,8 @@ paths:
       tags:
         - Metadata
       parameters:
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
         - $ref: "#/components/parameters/Header-Metadata"
         - $ref: "#/components/parameters/Query-BucketId"
         - $ref: "#/components/parameters/Query-ObjectId"
@@ -832,6 +1020,8 @@ paths:
       tags:
         - Tagging
       parameters:
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
         - $ref: "#/components/parameters/Query-BucketId"
         - $ref: "#/components/parameters/Query-ObjectId"
         - $ref: "#/components/parameters/Query-TagSet"
@@ -931,12 +1121,15 @@ paths:
         arbitrary array of permCode and user tuples. This is an idempotent
         operation, so users that already have a requested permission will remain
         unaffected. Only permissions successfully added to COMS will appear in
-        the response.
+        the response. The `recursive` option will also apply the specified
+        permissions to all child buckets where the current user has `MANAGE`
+        permissions.
       operationId: bucketAddPermissions
       tags:
         - Permission
       parameters:
         - $ref: "#/components/parameters/Path-BucketId"
+        - $ref: "#/components/parameters/Query-Recursive"
       requestBody:
         description: >-
           An array of bucket permissions, each containing a `userId` and
@@ -969,9 +1162,10 @@ paths:
         of users and subset of permissions to revoke. This is an idempotent
         operation, so users that already lack the specified permission(s) will
         remain unaffected. Only permissions successfully removed from COMS will
-        appear in the response. WARNING: Specifying no parameters will delete
-        all permissions associated with a bucket; it is possible to lock
-        yourself out of your own bucket!
+        appear in the response. The `recursive` option will also remove the specified
+        permissions from all child buckets where the current user has `MANAGE`
+        permissions. WARNING: Specifying no parameters will delete all permissions
+        associated with a bucket; it is possible to lock yourself out of your own bucket!
       operationId: bucketRemovePermissions
       tags:
         - Permission
@@ -979,6 +1173,7 @@ paths:
         - $ref: "#/components/parameters/Path-BucketId"
         - $ref: "#/components/parameters/Query-UserId"
         - $ref: "#/components/parameters/Query-PermCode"
+        - $ref: "#/components/parameters/Query-Recursive"
       responses:
         "200":
           description: Returns an array of deleted permissions
@@ -992,6 +1187,74 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        default:
+          $ref: "#/components/responses/Error"
+  /permission/invite:
+    post:
+      summary: Creates an invitation token
+      description: >-
+        Generates a time-limited invitation token which can be used by an
+        authenticated user to acquire read permissions to a specific resource.
+        Optional email-user validation may be specified to ensure the token is
+        only used by the intended recipient. User requires `MANAGE` permission
+        for the intended resource to proceed.
+      operationId: createInvite
+      tags:
+        - Permission
+      requestBody:
+        description: >-
+          An object containing at minimum either a `bucketId` or `objectId`
+          property, but not both.
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Request-CreateInvite"
+      responses:
+        "201":
+          description: Returns the invitation token uuid generated
+          content:
+            application/json:
+              schema:
+                type: string
+                description: The invitation token uuid
+                format: uuid
+                example: 59aa2c57-2d3d-4e78-99fc-4886457bd8b3
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        default:
+          $ref: "#/components/responses/Error"
+  /permission/invite/{token}:
+    get:
+      summary: Uses an invitation token
+      description: >-
+        Uses a time-limited invitation token assuming the correct user is
+        authenticated.
+      operationId: useInvite
+      tags:
+        - Permission
+      parameters:
+        - $ref: "#/components/parameters/Path-InviteToken"
+      responses:
+        "200":
+          description: Returns an object containing the resource uuid and the type
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Response-InviteResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "410":
+          $ref: "#/components/responses/Gone"
         default:
           $ref: "#/components/responses/Error"
   /permission/object:
@@ -1131,15 +1394,20 @@ paths:
     get:
       summary: Synchronize with the default bucket
       description: >-
-        Synchronize the contents of the default bucket with COMS so that it can
-        track and manage objects that are already in the bucket. This avoids the
-        need to re-upload preexisting files through the COMS API. This endpoint
+        Synchronize the contents of the default bucket (specified in environent
+        variables: `OBJECTSTORAGE_*`) with with current state in object storage.
+        This is a 'recursive' sync which will sync objects in all sub-folders.
+        Syncing avoids the need to re-upload preexisting files through the COMS API. This endpoint
         does not guarantee immediately synchronized results. Synchronization
         latency will be affected by the remaining number of objects awaiting
-        synchronization.
+        synchronization. This endpoint updates the last known successful
+        synchronization request date when invoked.
       operationId: syncDefault
       tags:
         - Sync
+      parameters:
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
       responses:
         "202":
           $ref: "#/components/responses/AddedQueueLength"
@@ -1152,10 +1420,16 @@ paths:
   /sync/status:
     get:
       summary: Get sync queue size
-      description: Returns the number of objects currently awaiting processing by COMS.
+      description: >-
+        Returns the number of objects (optionally filtered by bucketId)
+        currently in the queue awaiting synchronization with the state in object-storage.
       operationId: syncStatus
       tags:
         - Sync
+      parameters:
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
+        - $ref: "#/components/parameters/Query-BucketId"
       responses:
         "200":
           description: Returns the number of objects currently in the queue
@@ -1182,6 +1456,8 @@ paths:
       tags:
         - Tagging
       parameters:
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
         - $ref: "#/components/parameters/Query-TagSet"
       responses:
         "200":
@@ -1268,6 +1544,8 @@ paths:
       tags:
         - Metadata
       parameters:
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
         - $ref: "#/components/parameters/Header-Metadata"
         - in: query
           name: s3VersionId
@@ -1327,6 +1605,8 @@ paths:
       tags:
         - Tagging
       parameters:
+        - $ref: "#/components/parameters/Header-S3AccessMode-Bucket"
+        - $ref: "#/components/parameters/Header-S3AccessMode-Endpoint"
         - $ref: "#/components/parameters/Query-TagSet"
         - in: query
           name: s3VersionId
@@ -1446,7 +1726,7 @@ components:
       schema:
         type: string
         description: >-
-          A valid RFC 6266 header. Must be of type `attachment` with either a
+          A valid RFC 6266 header. Must include a type with either a
           `filename` or `filename*` parameter using the encoding defined in RFC
           8187 (normally UTF-8). For example, `skwc’әnjíłc.txt` must be
           represented as a url-encoded string
@@ -1477,14 +1757,29 @@ components:
       description: >-
         An arbitrary metadata key/value pair. Must contain the x-amz-meta-
         prefix to be valid. Multiple metadata pairs can be defined. Keys must be
-        unique and will be converted to lowercase.
+        unique, contain no whitespace, and will be converted to lowercase.
       schema:
         type: string
-        maximum: 255
+        minimum: 1
         example:
           - x-amz-meta-foo
           - x-amz-meta-bar
           - x-amz-meta-baz
+    Header-S3AccessMode-Bucket:
+      in: header
+      name: x-amz-bucket
+      description: >-
+        The ID of a bucket. Must be presented when authenticated using S3AccessMode.
+      schema:
+        type: string
+    Header-S3AccessMode-Endpoint:
+      in: header
+      name: x-amz-endpoint
+      description: >-
+        A valid RFC 3986 formatted S3 Service URI endpoint. Must be presented when authenticated using S3AccessMode.
+      schema:
+        type: string
+        maxLength: 255
     Path-BucketId:
       in: path
       name: bucketId
@@ -1494,6 +1789,15 @@ components:
         type: string
         format: uuid
         example: ac246e31-c807-496c-bc93-cd8bc2f1b2b4
+    Path-InviteToken:
+      in: path
+      name: token
+      description: Uuid of an invitation token
+      required: true
+      schema:
+        type: string
+        format: uuid
+        example: 59aa2c57-2d3d-4e78-99fc-4886457bd8b3
     Path-ObjectId:
       in: path
       name: objectId
@@ -1503,24 +1807,47 @@ components:
         type: string
         format: uuid
         example: 48a65990-2e48-46b2-94eb-7f4fe13468ea
-    Query-DeleteMarker:
-      in: query
-      name: deleteMarker
-      description: Boolean on object version DeleteMarker status
-      schema:
-        type: boolean
-        example: true
-    Query-Latest:
-      in: query
-      name: latest
-      description: Boolean on object version is latest
-      schema:
-        type: boolean
-        example: true
     Query-Active:
       in: query
       name: active
       description: Boolean on active status
+      schema:
+        type: boolean
+        example: true
+    Query-BucketId:
+      in: query
+      name: bucketId
+      description: Uuid or array of uuids representing the bucket
+      schema:
+        oneOf:
+          - type: string
+            format: uuid
+            example: ac246e31-c807-496c-bc93-cd8bc2f1b2b4
+          - type: array
+            items:
+              type: string
+              format: uuid
+              example: ac246e31-c807-496c-bc93-cd8bc2f1b2b4
+    Query-BucketName:
+      in: query
+      name: displayName
+      description: A display name given to the bucket on creation
+      schema:
+        type: string
+        example: Environmental Documents
+    Query-BucketPerms:
+      in: query
+      name: bucketPerms
+      description: >-
+        Boolean representing whether or not to include objects from buckets with
+        matching permissions
+      schema:
+        type: boolean
+        example: true
+    Query-DeleteMarker:
+      in: query
+      name: deleteMarker
+      description: Boolean on object version DeleteMarker status
       schema:
         type: boolean
         example: true
@@ -1538,9 +1865,10 @@ components:
     Query-Email:
       in: query
       name: email
-      description: Search by specific email
+      description: Search by specific email. For non-IDIR users, only exact matches are returned; for IDIR users, partial matches are possible.
       schema:
         type: string
+        format: email
         example: bobsmith@gov.bc.ca
     Query-ExpiresIn:
       in: query
@@ -1551,20 +1879,6 @@ components:
         format: int32
         default: 300
         example: 300
-    Query-IdentityId:
-      in: query
-      name: identityId
-      description: >-
-        String or array of strings representing the user (identified by optional
-        KC_IDENTITYKEY env variable)
-      schema:
-        oneOf:
-          - type: string
-            example: 5dad1ec9d3c04b0f8eadcb4d9fa98987
-          - type: array
-            items:
-              type: string
-              example: 5dad1ec9d3c04b0f8eadcb4d9fa98987
     Query-FirstName:
       in: query
       name: firstName
@@ -1579,6 +1893,20 @@ components:
       schema:
         type: string
         example: bob smith
+    Query-IdentityId:
+      in: query
+      name: identityId
+      description: >-
+        String or array of strings representing the user (identified by optional
+        KC_IDENTITYKEY env variable)
+      schema:
+        oneOf:
+          - type: string
+            example: 5dad1ec9d3c04b0f8eadcb4d9fa98987
+          - type: array
+            items:
+              type: string
+              example: 5dad1ec9d3c04b0f8eadcb4d9fa98987
     Query-Idp:
       in: query
       name: idp
@@ -1593,6 +1921,13 @@ components:
             items:
               type: string
               example: idir
+    Query-Key:
+      in: query
+      name: key
+      description: The prefix given to objects in the bucket
+      schema:
+        type: string
+        example: coms/env
     Query-LastName:
       in: query
       name: lastName
@@ -1600,6 +1935,22 @@ components:
       schema:
         type: string
         example: smith
+    Query-Latest:
+      in: query
+      name: latest
+      description: Boolean on object version is latest
+      schema:
+        type: boolean
+        example: true
+    Query-Limit:
+      in: query
+      name: limit
+      description: >-
+        The page size, number of objects in a page. Must specify page number
+        when defined.
+      schema:
+        type: number
+        example: 10
     Query-MimeType:
       in: query
       name: mimeType
@@ -1609,6 +1960,13 @@ components:
         description: The object MIME Type
         default: application/octet-stream
         example: text/plain
+    Query-Name:
+      in: query
+      name: name
+      description: The filename of the object (typically the original filename)
+      schema:
+        type: string
+        example: foobar.txt
     Query-ObjectId:
       in: query
       name: objectId
@@ -1623,50 +1981,6 @@ components:
               type: string
               format: uuid
               example: ac246e31-c807-496c-bc93-cd8bc2f1b2b4
-    Query-BucketId:
-      in: query
-      name: bucketId
-      description: Uuid or array of uuids representing the bucket
-      schema:
-        oneOf:
-          - type: string
-            format: uuid
-            example: ac246e31-c807-496c-bc93-cd8bc2f1b2b4
-          - type: array
-            items:
-              type: string
-              format: uuid
-              example: ac246e31-c807-496c-bc93-cd8bc2f1b2b4
-    Query-BucketName:
-      in: query
-      name: name
-      description: A display name given to the bucket on creation
-      schema:
-        type: string
-        example: Environmental Documents
-    Query-BucketPerms:
-      in: query
-      name: bucketPerms
-      description: >-
-        Boolean representing whether or not to include objects from buckets with
-        matching permissions
-      schema:
-        type: boolean
-        example: true
-    Query-Key:
-      in: query
-      name: key
-      description: The prefix given to objects in the bucket
-      schema:
-        type: string
-        example: coms/env
-    Query-Name:
-      in: query
-      name: name
-      description: The filename of the object (typically the original filename)
-      schema:
-        type: string
-        example: foobar.txt
     Query-ObjectPerms:
       in: query
       name: objectPerms
@@ -1676,6 +1990,16 @@ components:
       schema:
         type: boolean
         example: true
+    Query-Order:
+      in: query
+      name: order
+      description: Order in ascending or descending. Default to ascending order.
+      schema:
+        type: string
+        enum:
+          - asc
+          - desc
+        example: asc
     Query-Path:
       in: query
       name: path
@@ -1700,6 +2024,54 @@ components:
       schema:
         type: boolean
         example: true
+    Query-Permissions:
+      in: query
+      name: permissions
+      description: Boolean representing whether or not to include matching permissions
+      schema:
+        type: boolean
+        example: true
+    Query-Page:
+      in: query
+      name: page
+      description: >-
+        The index of the page to return. The index of first page is 1. Must
+        specify limit when defined.
+      schema:
+        type: number
+        example: 1
+    Query-Sort:
+      in: query
+      name: sort
+      description: Any possible object Column.
+      schema:
+        type: string
+        enum:
+          - id
+          - path
+          - public
+          - active
+          - createdBy
+          - updatedBy
+          - updatedAt
+          - bucketId
+          - name
+        example: name
+    Query-Recursive:
+      in: query
+      name: recursive
+      description: >-
+        Whether or not to also run this operation for sub-folders inside the provided bucket/folder
+      schema:
+        type: boolean
+        default: false
+        example: 1
+    Query-S3VersionId:
+      in: query
+      name: s3VersionId
+      description: A specified version
+      schema:
+        $ref: "#/components/schemas/S3VersionId"
     Query-TagSet:
       in: query
       name: tagset[*]
@@ -1742,12 +2114,6 @@ components:
       schema:
         type: string
         example: bobsmith
-    Query-S3VersionId:
-      in: query
-      name: s3VersionId
-      description: A specified version
-      schema:
-        $ref: "#/components/schemas/S3VersionId"
     Query-VersionId:
       in: query
       name: versionId
@@ -1805,6 +2171,12 @@ components:
               type: string
               example: coms/env
               maxLength: 255
+            lastSyncRequestedDate:
+              description: Time when a sync request was last submitted for the bucket
+              type: string
+              format: date-time
+              example: "2022-03-11T23:19:16.343Z"
+              default: null
             region:
               type: string
               description: >-
@@ -1932,6 +2304,12 @@ components:
               type: string
               description: The filename of the original file uploaded
               example: foobar.txt
+            lastSyncedDate:
+              type: string
+              format: date-time
+              description: Time when the object was last synced with the S3 bucket
+              example: "2022-03-11T23:19:16.343Z"
+              default: null
         - $ref: "#/components/schemas/DB-TimestampUserData"
     DB-ObjectPermission:
       title: DB Object Permission
@@ -2107,6 +2485,14 @@ components:
                 An entity tag (ETag) is an opaque identifier assigned by a web
                 server to a specific version of a resource found at a URL
               example: '"9d1aaa54b84e1d6ccc6e0477c5717fe3"'
+            lastModifiedDate:
+              type: string
+              format: date-time
+              description: >-
+                The object creation date or the last modified date (as exposed
+                by S3's `Last-Modified` header), whichever is the latest.
+              example: "2022-03-11T23:19:16.343Z"
+              default: null
         - $ref: "#/components/schemas/DB-TimestampUserData"
     DownloadMode:
       title: Download Mode
@@ -2147,6 +2533,78 @@ components:
               type: string
               default: /
               example: coms/env
+            permCodes:
+              type: array
+              items:
+                type: string
+              description: >-
+                Optional array of permCodes for each permission being given to the current user.
+                Accepts any of `"READ", "CREATE", "UPDATE", "DELETE", "MANAGE"`.
+                Defaults to all permCodes if unspecified.
+              example: ["READ", "CREATE", "UPDATE"]
+    Request-CreateBucketChild:
+      title: Request Create Bucket Child
+      type: object
+      required:
+        - bucketName
+        - subKey
+      allOf:
+        - type: object
+          properties:
+            bucketName:
+              type: string
+              description: A human-readable label or title
+              maxLength: 255
+              example: Geospatial Maps
+            subKey:
+              type: string
+              description: a path relative to the parent bucket to the 'directory' you are mounting
+              maxLength: 255
+              example: my-subfolder
+    Request-CreateInvite:
+      title: Request Create Invite
+      type: object
+      properties:
+        bucketId:
+          type: string
+          description: >-
+            Optional uuid representing the bucket. Either `bucketId` or
+            `objectId` must be specified.
+          format: uuid
+          example: ac246e31-c807-496c-bc93-cd8bc2f1b2b4
+        recursive:
+          type: boolean
+          description: >-
+            Optionally apply permCodes to all sub-folders in the spcified bucket
+          example: true
+        email:
+          type: string
+          description: >-
+            Optional email address of the intended recipient for this
+            invitation. The invitation will perform extra validation if
+            specified.
+          format: email
+          example: bobsmith@gov.bc.ca
+        expiresAt:
+          type: integer
+          description: >-
+            Optional desired unix epoch time for when this invitation should
+            expire. Defaults to 24 hours from now if unspecified. Maximum of 30 days from now.
+          example: 1710000000
+        objectId:
+          type: string
+          description: >-
+            Optional uuid representing the object. Either `bucketId` or
+            `objectId` must be specified.
+          format: uuid
+          example: 48a65990-2e48-46b2-94eb-7f4fe13468ea
+        permCodes:
+          title: Permission Code
+          type: array
+          items:
+            type: string
+          description: Optional array of permCode. Defaults to `READ`, if unspecified. Accepts any of `"READ", "CREATE", "UPDATE"` for bucket or  `"READ", "UPDATE"` for objects
+          example: ["READ", "CREATE", "UPDATE"]
     Request-UpdateBucket:
       title: Request Update Bucket
       type: object
@@ -2304,6 +2762,41 @@ components:
               example: 403
             detail:
               example: User lacks permission to complete this action
+    Response-Gone:
+      title: Response Gone
+      type: object
+      allOf:
+        - $ref: "#/components/schemas/Response-Problem"
+        - type: object
+          properties:
+            status:
+              example: 410
+            title:
+              example: Gone
+            type:
+              example: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/410
+    Response-InviteResult:
+      title: Response Invite Result
+      description: >-
+        An object containing the resource uuid and the type of resource it
+        represents.
+      type: object
+      required:
+        - resource
+        - type
+      properties:
+        resource:
+          type: string
+          format: uuid
+          description: The unique identifier for the resource.
+          example: ac246e31-c807-496c-bc93-cd8bc2f1b2b4
+        type:
+          type: string
+          description: The type of resource the uuid represents
+          enum:
+            - bucketId
+            - objectId
+          example: objectId
     Response-LengthRequired:
       title: Length Required
       type: object
@@ -2741,6 +3234,12 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Response-Forbidden"
+    Gone:
+      description: Gone
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Response-Gone"
     LengthRequired:
       description: Length Required
       content:
@@ -2791,7 +3290,10 @@ components:
   securitySchemes:
     BasicAuth:
       type: http
-      description: Basic auth via environment defined username and password
+      description: |
+        Authentication can be done via basic authentication using an environment-defined username and password, or for service accounts, using the bucket's accessKeyId and secretAccessKey. There are two ways to authenticate with basic auth:
+        * When basic auth is enabled (via the environment variable `BASICAUTH_ENABLED`), clients can authenticate by providing an Authorization header with the word "Basic", followed by a space and a base64-encoded string in the format `username:password`.
+        * When 'S3 Access Mode' is enabled (via the environment variable `S3ACCESSMODE_ENABLED`), clients can authenticate with an Authorization header containing the word "Basic", followed by a space and a base64-encoded string in the format `accessKeyId:secretAccessKey`. Additionally, the headers `x-amz-bucket:` and `x-amz-endpoint:` are required.
       scheme: basic
     BearerAuth:
       type: http

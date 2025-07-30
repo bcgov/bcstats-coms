@@ -4,12 +4,14 @@ const {
   DeleteObjectTaggingCommand,
   GetBucketEncryptionCommand,
   GetBucketVersioningCommand,
+  GetObjectAclCommand,
   GetObjectCommand,
   GetObjectTaggingCommand,
   HeadBucketCommand,
   HeadObjectCommand,
   ListObjectsV2Command,
   ListObjectVersionsCommand,
+  PutObjectAclCommand,
   PutBucketEncryptionCommand,
   PutObjectCommand,
   PutObjectTaggingCommand,
@@ -25,7 +27,9 @@ const service = require('../../../src/services/storage');
 const utils = require('../../../src/components/utils');
 const { MetadataDirective, TaggingDirective } = require('../../../src/components/constants');
 
-const DEFAULTREGION = 'us-east-1'; // Need to specify valid AWS region or it'll explode ('us-east-1' is default, 'ca-central-1' for Canada)
+// Need to specify valid AWS region or it'll explode ('us-east-1' is default, 'ca-central-1' for Canada)
+const DEFAULTREGION = 'us-east-1';
+
 const bucket = 'bucket';
 const key = 'filePath';
 const defaultTempExpiresIn = parseInt(config.get('server.defaultTempExpiresIn'), 10);
@@ -79,12 +83,11 @@ describe('copyObject', () => {
     expect(s3ClientMock).toHaveReceivedCommandTimes(CopyObjectCommand, 1);
     expect(s3ClientMock).toHaveReceivedCommandWith(CopyObjectCommand, {
       Bucket: bucket,
-      CopySource: `${bucket}/${copySource}`,
+      CopySource: `${bucket}/${copySource}?versionId=${undefined}`,
       Key: filePath,
       Metadata: undefined,
       MetadataDirective: MetadataDirective.COPY,
       TaggingDirective: TaggingDirective.COPY,
-      VersionId: undefined
     });
   });
 
@@ -99,12 +102,11 @@ describe('copyObject', () => {
     expect(s3ClientMock).toHaveReceivedCommandTimes(CopyObjectCommand, 1);
     expect(s3ClientMock).toHaveReceivedCommandWith(CopyObjectCommand, {
       Bucket: bucket,
-      CopySource: `${bucket}/${copySource}`,
+      CopySource: `${bucket}/${copySource}?versionId=1234`,
       Key: filePath,
       Metadata: undefined,
       MetadataDirective: MetadataDirective.COPY,
       TaggingDirective: TaggingDirective.COPY,
-      VersionId: s3VersionId
     });
   });
 
@@ -120,12 +122,11 @@ describe('copyObject', () => {
     expect(s3ClientMock).toHaveReceivedCommandTimes(CopyObjectCommand, 1);
     expect(s3ClientMock).toHaveReceivedCommandWith(CopyObjectCommand, {
       Bucket: bucket,
-      CopySource: `${bucket}/${copySource}`,
+      CopySource: `${bucket}/${copySource}?versionId=${undefined}`,
       Key: filePath,
       Metadata: metadata,
       MetadataDirective: metadataDirective,
       TaggingDirective: TaggingDirective.COPY,
-      VersionId: undefined
     });
   });
 
@@ -142,12 +143,11 @@ describe('copyObject', () => {
     expect(s3ClientMock).toHaveReceivedCommandTimes(CopyObjectCommand, 1);
     expect(s3ClientMock).toHaveReceivedCommandWith(CopyObjectCommand, {
       Bucket: bucket,
-      CopySource: `${bucket}/${copySource}`,
+      CopySource: `${bucket}/${copySource}?versionId=1234`,
       Key: filePath,
       Metadata: metadata,
       MetadataDirective: metadataDirective,
       TaggingDirective: TaggingDirective.COPY,
-      VersionId: s3VersionId
     });
   });
 
@@ -163,13 +163,12 @@ describe('copyObject', () => {
     expect(s3ClientMock).toHaveReceivedCommandTimes(CopyObjectCommand, 1);
     expect(s3ClientMock).toHaveReceivedCommandWith(CopyObjectCommand, {
       Bucket: bucket,
-      CopySource: `${bucket}/${copySource}`,
+      CopySource: `${bucket}/${copySource}?versionId=${undefined}`,
       Key: filePath,
       Metadata: undefined,
       MetadataDirective: MetadataDirective.COPY,
       Tagging: 'test=123',
       TaggingDirective: taggingDirective,
-      VersionId: undefined
     });
   });
 
@@ -186,13 +185,12 @@ describe('copyObject', () => {
     expect(s3ClientMock).toHaveReceivedCommandTimes(CopyObjectCommand, 1);
     expect(s3ClientMock).toHaveReceivedCommandWith(CopyObjectCommand, {
       Bucket: bucket,
-      CopySource: `${bucket}/${copySource}`,
+      CopySource: `${bucket}/${copySource}?versionId=1234`,
       Key: filePath,
       Metadata: undefined,
       MetadataDirective: MetadataDirective.COPY,
       Tagging: 'test=123',
       TaggingDirective: taggingDirective,
-      VersionId: s3VersionId
     });
   });
 });
@@ -340,6 +338,100 @@ describe('getBucketVersioning', () => {
   });
 });
 
+describe('getObjectAcl', () => {
+  beforeEach(() => {
+    s3ClientMock.on(GetObjectAclCommand).resolves({});
+  });
+
+  it('should send a get object acl command', async () => {
+    const filePath = 'filePath';
+    const result = await service.getObjectAcl({ filePath });
+
+    expect(result).toBeTruthy();
+    expect(utils.getBucket).toHaveBeenCalledTimes(1);
+    expect(s3ClientMock).toHaveReceivedCommandTimes(GetObjectAclCommand, 1);
+    expect(s3ClientMock).toHaveReceivedCommandWith(GetObjectAclCommand, {
+      Bucket: bucket,
+      Key: filePath,
+      VersionId: undefined
+    });
+  });
+
+  it('should send a put object acl command for a specific version', async () => {
+    const filePath = 'filePath';
+    const s3VersionId = '1234';
+    const result = await service.getObjectAcl({ filePath, s3VersionId });
+
+    expect(result).toBeTruthy();
+    expect(utils.getBucket).toHaveBeenCalledTimes(1);
+    expect(s3ClientMock).toHaveReceivedCommandTimes(GetObjectAclCommand, 1);
+    expect(s3ClientMock).toHaveReceivedCommandWith(GetObjectAclCommand, {
+      Bucket: bucket,
+      Key: filePath,
+      VersionId: s3VersionId
+    });
+  });
+});
+
+describe('getObjectPublic', () => {
+  const getObjectAclMock = jest.spyOn(service, 'getObjectAcl');
+
+  beforeEach(() => {
+    getObjectAclMock.mockReset();
+  });
+
+  afterAll(() => {
+    getObjectAclMock.mockRestore();
+  });
+
+  it('should return true', async () => {
+    const filePath = 'filePath';
+    getObjectAclMock.mockResolvedValue({ Grants: [
+      {
+        'Grantee': {
+          'DisplayName': 'name',
+          'ID': 'id',
+          'Type': 'CanonicalUser'
+        },
+        'Permission': 'FULL_CONTROL'
+      },
+      {
+        'Grantee': {
+          'URI': 'http://acs.amazonaws.com/groups/global/AllUsers',
+          'Type': 'Group'
+        },
+        'Permission': 'READ'
+      }
+    ]});
+
+    const result = await service.getObjectPublic({ filePath });
+
+    expect(result).toBeTruthy();
+    expect(getObjectAclMock).toHaveBeenCalledTimes(1);
+    expect(getObjectAclMock).toHaveBeenCalledWith(expect.objectContaining({ filePath }));
+  });
+
+  it('should return false', async () => {
+    const filePath = 'filePath';
+    getObjectAclMock.mockResolvedValue({ Grants: [
+      {
+        'Grantee': {
+          'DisplayName': 'name',
+          'ID': 'id',
+          'Type': 'CanonicalUser'
+        },
+        'Permission': 'FULL_CONTROL'
+      }
+    ]});
+
+    const result = await service.getObjectPublic({ filePath });
+
+    expect(result).toBeFalsy();
+    expect(getObjectAclMock).toHaveBeenCalledTimes(1);
+    expect(getObjectAclMock).toHaveBeenCalledWith(expect.objectContaining({ filePath }));
+  });
+});
+
 describe('getObjectTagging', () => {
   beforeEach(() => {
     s3ClientMock.on(GetObjectTaggingCommand).resolves({});
@@ -456,8 +548,14 @@ describe('listAllObjects', () => {
 
   it('should call listObjectsV2 multiple times and return an array of precise path objects', async () => {
     const continueToken = 'token';
-    listObjectsV2Mock.mockResolvedValueOnce({ Contents: [{ Key: 'filePath/foo' }], IsTruncated: true, NextContinuationToken: continueToken });
-    listObjectsV2Mock.mockResolvedValueOnce({ Contents: [{ Key: 'filePath/bar' }], IsTruncated: false });
+    listObjectsV2Mock.mockResolvedValueOnce({
+      Contents: [{ Key: 'filePath/foo' }],
+      IsTruncated: true,
+      NextContinuationToken: continueToken });
+    listObjectsV2Mock.mockResolvedValueOnce({
+      Contents: [{ Key: 'filePath/bar' }],
+      IsTruncated: false
+    });
 
     const result = await service.listAllObjects();
 
@@ -482,8 +580,14 @@ describe('listAllObjects', () => {
 
   it('should call listObjectsV2 multiple times and return an array of all path objects', async () => {
     const continueToken = 'token';
-    listObjectsV2Mock.mockResolvedValueOnce({ Contents: [{ Key: 'filePath/test/foo' }], IsTruncated: true, NextContinuationToken: continueToken });
-    listObjectsV2Mock.mockResolvedValueOnce({ Contents: [{ Key: 'filePath/test/bar' }], IsTruncated: false });
+    listObjectsV2Mock.mockResolvedValueOnce({
+      Contents: [{ Key: 'filePath/test/foo' }],
+      IsTruncated: true,
+      NextContinuationToken: continueToken });
+    listObjectsV2Mock.mockResolvedValueOnce({
+      Contents: [{ Key: 'filePath/test/bar' }],
+      IsTruncated: false
+    });
 
     const result = await service.listAllObjects({ precisePath: false });
 
@@ -506,34 +610,43 @@ describe('listAllObjects', () => {
     }));
   });
 
-  it('should call listObjectsV2 multiple times with the right bucketId and filePath, returning an array of objects', async () => {
-    const continueToken = 'token';
-    const customPath = 'filePath/test';
-    listObjectsV2Mock.mockResolvedValueOnce({ Contents: [{ Key: 'filePath/test/foo' }], IsTruncated: true, NextContinuationToken: continueToken });
-    listObjectsV2Mock.mockResolvedValueOnce({ Contents: [{ Key: 'filePath/test/bar' }], IsTruncated: false });
+  it(
+    'should call listObjectsV2 multiple times with the right bucketId and filePath, returning an array of objects',
+    async () => {
+      const continueToken = 'token';
+      const customPath = 'filePath/test';
+      listObjectsV2Mock.mockResolvedValueOnce({
+        Contents: [{ Key: 'filePath/test/foo' }],
+        IsTruncated: true,
+        NextContinuationToken: continueToken });
+      listObjectsV2Mock.mockResolvedValueOnce({
+        Contents: [{ Key: 'filePath/test/bar' }],
+        IsTruncated: false
+      });
 
-    const result = await service.listAllObjects({ filePath: customPath, bucketId: bucket });
+      const result = await service.listAllObjects({ filePath: customPath, bucketId: bucket });
 
-    expect(result).toBeTruthy();
-    expect(Array.isArray(result)).toBeTruthy();
-    expect(result).toHaveLength(2);
-    expect(result).toEqual(expect.arrayContaining([
-      { Key: 'filePath/test/foo' },
-      { Key: 'filePath/test/bar' }
-    ]));
-    expect(utils.getBucket).toHaveBeenCalledTimes(0);
-    expect(utils.isAtPath).toHaveBeenCalledTimes(2);
-    expect(listObjectsV2Mock).toHaveBeenCalledTimes(2);
-    expect(listObjectsV2Mock).toHaveBeenNthCalledWith(1, expect.objectContaining({
-      filePath: customPath,
-      bucketId: bucket
-    }));
-    expect(listObjectsV2Mock).toHaveBeenNthCalledWith(2, expect.objectContaining({
-      filePath: customPath,
-      continuationToken: continueToken,
-      bucketId: bucket
-    }));
-  });
+      expect(result).toBeTruthy();
+      expect(Array.isArray(result)).toBeTruthy();
+      expect(result).toHaveLength(2);
+      expect(result).toEqual(expect.arrayContaining([
+        { Key: 'filePath/test/foo' },
+        { Key: 'filePath/test/bar' }
+      ]));
+      expect(utils.getBucket).toHaveBeenCalledTimes(0);
+      expect(utils.isAtPath).toHaveBeenCalledTimes(2);
+      expect(listObjectsV2Mock).toHaveBeenCalledTimes(2);
+      expect(listObjectsV2Mock).toHaveBeenNthCalledWith(1, expect.objectContaining({
+        filePath: customPath,
+        bucketId: bucket
+      }));
+      expect(listObjectsV2Mock).toHaveBeenNthCalledWith(2, expect.objectContaining({
+        filePath: customPath,
+        continuationToken: continueToken,
+        bucketId: bucket
+      }));
+    }
+  );
 });
 
 describe('listAllObjectVersions', () => {
@@ -589,8 +702,14 @@ describe('listAllObjectVersions', () => {
 
   it('should call listObjectVersion multiple times and return precise path objects', async () => {
     const nextKeyMarker = 'token';
-    listObjectVersionMock.mockResolvedValueOnce({ DeleteMarkers: [{ Key: 'filePath/foo' }], IsTruncated: true, NextKeyMarker: nextKeyMarker });
-    listObjectVersionMock.mockResolvedValueOnce({ Versions: [{ Key: 'filePath/bar' }], IsTruncated: false });
+    listObjectVersionMock.mockResolvedValueOnce({
+      DeleteMarkers: [{ Key: 'filePath/foo' }],
+      IsTruncated: true,
+      NextKeyMarker: nextKeyMarker });
+    listObjectVersionMock.mockResolvedValueOnce({
+      Versions: [{ Key: 'filePath/bar' }],
+      IsTruncated: false
+    });
 
     const result = await service.listAllObjectVersions({ filePath: 'filePath' });
 
@@ -619,8 +738,14 @@ describe('listAllObjectVersions', () => {
 
   it('should call listObjectVersion multiple times and return all path objects', async () => {
     const nextKeyMarker = 'token';
-    listObjectVersionMock.mockResolvedValueOnce({ DeleteMarkers: [{ Key: 'filePath/test/foo' }], IsTruncated: true, NextKeyMarker: nextKeyMarker });
-    listObjectVersionMock.mockResolvedValueOnce({ Versions: [{ Key: 'filePath/test/bar' }], IsTruncated: false });
+    listObjectVersionMock.mockResolvedValueOnce({
+      DeleteMarkers: [{ Key: 'filePath/test/foo' }],
+      IsTruncated: true,
+      NextKeyMarker: nextKeyMarker });
+    listObjectVersionMock.mockResolvedValueOnce({
+      Versions: [{ Key: 'filePath/test/bar' }],
+      IsTruncated: false
+    });
 
     const result = await service.listAllObjectVersions({ filePath: 'filePath', precisePath: false });
 
@@ -649,10 +774,20 @@ describe('listAllObjectVersions', () => {
 
   it('should call listObjectVersion multiple times and return all latest path objects', async () => {
     const nextKeyMarker = 'token';
-    listObjectVersionMock.mockResolvedValueOnce({ DeleteMarkers: [{ Key: 'filePath/test/foo', IsLatest: true }], IsTruncated: true, NextKeyMarker: nextKeyMarker });
-    listObjectVersionMock.mockResolvedValueOnce({ Versions: [{ Key: 'filePath/test/bar', IsLatest: false }], IsTruncated: false });
+    listObjectVersionMock.mockResolvedValueOnce({
+      DeleteMarkers: [{ Key: 'filePath/test/foo', IsLatest: true }],
+      IsTruncated: true,
+      NextKeyMarker: nextKeyMarker });
+    listObjectVersionMock.mockResolvedValueOnce({
+      Versions: [{ Key: 'filePath/test/bar', IsLatest: false }],
+      IsTruncated: false
+    });
 
-    const result = await service.listAllObjectVersions({ filePath: 'filePath', precisePath: false, filterLatest: true });
+    const result = await service.listAllObjectVersions({
+      filePath: 'filePath',
+      precisePath: false,
+      filterLatest: true
+    });
 
     expect(result).toBeTruthy();
     expect(Array.isArray(result.DeleteMarkers)).toBeTruthy();
@@ -851,6 +986,85 @@ describe('putObject', () => {
   });
 });
 
+describe('putObjectAcl', () => {
+  beforeEach(() => {
+    s3ClientMock.on(PutObjectAclCommand).resolves({});
+  });
+
+  it('should send a put object acl command', async () => {
+    const acl = 'public-read';
+    const filePath = 'filePath';
+    const result = await service.putObjectAcl({ acl, filePath });
+
+    expect(result).toBeTruthy();
+    expect(utils.getBucket).toHaveBeenCalledTimes(1);
+    expect(s3ClientMock).toHaveReceivedCommandTimes(PutObjectAclCommand, 1);
+    expect(s3ClientMock).toHaveReceivedCommandWith(PutObjectAclCommand, {
+      ACL: acl,
+      Bucket: bucket,
+      Key: filePath,
+      VersionId: undefined
+    });
+  });
+
+  it('should send a put object acl for a specific version', async () => {
+    const acl = 'public-read';
+    const filePath = 'filePath';
+    const s3VersionId = '1234';
+    const result = await service.putObjectAcl({ acl, filePath, s3VersionId });
+
+    expect(result).toBeTruthy();
+    expect(utils.getBucket).toHaveBeenCalledTimes(1);
+    expect(s3ClientMock).toHaveReceivedCommandTimes(PutObjectAclCommand, 1);
+    expect(s3ClientMock).toHaveReceivedCommandWith(PutObjectAclCommand, {
+      ACL: acl,
+      Bucket: bucket,
+      Key: filePath,
+      VersionId: s3VersionId
+    });
+  });
+});
+
+describe('putObjectPublic', () => {
+  const putObjectAclMock = jest.spyOn(service, 'putObjectAcl');
+
+  beforeEach(() => {
+    putObjectAclMock.mockReset();
+  });
+
+  afterAll(() => {
+    putObjectAclMock.mockRestore();
+  });
+
+  it('should set to public', async () => {
+    const filePath = 'filePath';
+    putObjectAclMock.mockResolvedValue({});
+
+    const result = await service.putObjectPublic({ filePath, public: true });
+
+    expect(result).toBeTruthy();
+    expect(putObjectAclMock).toHaveBeenCalledTimes(1);
+    expect(putObjectAclMock).toHaveBeenCalledWith(expect.objectContaining({
+      acl: 'public-read',
+      filePath: filePath
+    }));
+  });
+
+  it('should set to non-public', async () => {
+    const filePath = 'filePath';
+    putObjectAclMock.mockResolvedValue({});
+
+    const result = await service.putObjectPublic({ filePath });
+
+    expect(result).toBeTruthy();
+    expect(putObjectAclMock).toHaveBeenCalledTimes(1);
+    expect(putObjectAclMock).toHaveBeenCalledWith(expect.objectContaining({
+      acl: 'private',
+      filePath: filePath
+    }));
+  });
+});
+
 describe('putObjectTagging', () => {
   beforeEach(() => {
     s3ClientMock.on(PutObjectTaggingCommand).resolves({});
@@ -941,21 +1155,24 @@ describe('readSignedUrl', () => {
     presignUrlMock.mockRestore();
   });
 
-  it('should call presignUrl with a get object command for the latest object and default expiration and bucketId', async () => {
-    const filePath = 'filePath';
-    const bucketId = 'abc';
-    const result = await service.readSignedUrl({ filePath, bucketId: bucketId });
+  it(
+    'should call presignUrl with a get object command for the latest object and default expiration and bucketId',
+    async () => {
+      const filePath = 'filePath';
+      const bucketId = 'abc';
+      const result = await service.readSignedUrl({ filePath, bucketId: bucketId });
 
-    expect(result).toBeTruthy();
-    expect(utils.getBucket).toHaveBeenCalledTimes(1);
-    expect(presignUrlMock).toHaveBeenCalledTimes(1);
-    expect(presignUrlMock).toHaveBeenCalledWith(expect.objectContaining({
-      input: {
-        Bucket: bucket,
-        Key: filePath
-      }
-    }), defaultTempExpiresIn, bucketId);
-  });
+      expect(result).toBeTruthy();
+      expect(utils.getBucket).toHaveBeenCalledTimes(1);
+      expect(presignUrlMock).toHaveBeenCalledTimes(1);
+      expect(presignUrlMock).toHaveBeenCalledWith(expect.objectContaining({
+        input: {
+          Bucket: bucket,
+          Key: filePath
+        }
+      }), defaultTempExpiresIn, bucketId);
+    }
+  );
 
   it('should call presignUrl with a get object command for a specific version and default expiration', async () => {
     const filePath = 'filePath';

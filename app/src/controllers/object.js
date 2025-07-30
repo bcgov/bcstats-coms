@@ -1,5 +1,4 @@
 const Problem = require('api-problem');
-const config = require('config');
 const cors = require('cors');
 const { v4: uuidv4, NIL: SYSTEM_USER } = require('uuid');
 
@@ -9,13 +8,15 @@ const {
   MAXCOPYOBJECTLENGTH,
   MAXFILEOBJECTLENGTH,
   MetadataDirective,
-  TaggingDirective
+  TaggingDirective,
+  MAXOBJECTKEYLENGTH
 } = require('../components/constants');
 const errorToProblem = require('../components/errorToProblem');
 const log = require('../components/log')(module.filename);
 const {
   addDashesToUuid,
   getBucketId,
+  getConfigBoolean,
   getCurrentIdentity,
   getKeyValue,
   getMetadata,
@@ -34,6 +35,7 @@ const {
   metadataService,
   objectService,
   storageService,
+  syncService,
   tagService,
   userService,
   versionService,
@@ -103,7 +105,11 @@ const controller = {
       const userId = await userService.getCurrentUserId(getCurrentIdentity(req.currentUser, SYSTEM_USER));
 
       // get source S3 VersionId
-      const sourceS3VersionId = await getS3VersionId(req.query.s3VersionId, addDashesToUuid(req.query.versionId), objId);
+      const sourceS3VersionId = await getS3VersionId(
+        req.query.s3VersionId,
+        addDashesToUuid(req.query.versionId),
+        objId
+      );
 
       // get version from S3
       const source = await storageService.headObject({
@@ -115,7 +121,11 @@ const controller = {
         throw new Error('Cannot copy an object larger than 5GB');
       }
       // get existing tags on source object, eg: { 'animal': 'bear', colour': 'black' }
-      const sourceObject = await storageService.getObjectTagging({ filePath: objPath, s3VersionId: sourceS3VersionId, bucketId: bucketId });
+      const sourceObject = await storageService.getObjectTagging({
+        filePath: objPath,
+        s3VersionId: sourceS3VersionId,
+        bucketId: bucketId
+      });
       const sourceTags = Object.assign({},
         ...(sourceObject.TagSet?.map(item => ({ [item.Key]: item.Value })) ?? [])
       );
@@ -141,8 +151,18 @@ const controller = {
       await utils.trxWrapper(async (trx) => {
         // create or update version in DB (if a non-versioned object)
         const version = s3Response.VersionId ?
-          await versionService.copy(sourceS3VersionId, s3Response.VersionId, objId, s3Response.CopyObjectResult?.ETag, userId, trx) :
-          await versionService.update({ ...data, id: objId, etag: s3Response.CopyObjectResult?.ETag, isLatest: true }, userId, trx);
+          await versionService.copy(
+            sourceS3VersionId, s3Response.VersionId, objId, s3Response.CopyObjectResult?.ETag,
+            s3Response.CopyObjectResult?.LastModified, userId, trx
+          ) :
+          await versionService.update({
+            ...data,
+            id: objId,
+            etag: s3Response.CopyObjectResult?.ETag,
+            isLatest: true,
+            lastModifiedDate: s3Response.CopyObjectResult?.LastModified
+              ? new Date(s3Response.CopyObjectResult?.LastModified).toISOString() : undefined
+          }, userId, trx);
 
         // add metadata for version in DB
         await metadataService.associateMetadata(version.id, getKeyValue(data.metadata), userId, trx);
@@ -175,9 +195,15 @@ const controller = {
       // format new tags to array of objects
       const newTags = Object.entries({ ...req.query.tagset }).map(([k, v]) => ({ Key: k, Value: v }));
       // get source version that we are adding tags to
-      const sourceS3VersionId = await getS3VersionId(req.query.s3VersionId, addDashesToUuid(req.query.versionId), objId);
+      const sourceS3VersionId = await getS3VersionId(
+        req.query.s3VersionId, addDashesToUuid(req.query.versionId), objId
+      );
       // get existing tags on source version
-      const { TagSet: existingTags } = await storageService.getObjectTagging({ filePath: objPath, s3VersionId: sourceS3VersionId, bucketId: bucketId });
+      const { TagSet: existingTags } = await storageService.getObjectTagging({
+        filePath: objPath,
+        s3VersionId: sourceS3VersionId,
+        bucketId: bucketId
+      });
 
       const newSet = newTags
         // Join new tags and existing tags
@@ -235,7 +261,11 @@ const controller = {
       // Preflight CREATE permission check if bucket scoped and OIDC authenticated
       const bucketId = req.query.bucketId ? addDashesToUuid(req.query.bucketId) : undefined;
       if (bucketId && userId) {
-        const permission = await bucketPermissionService.searchPermissions({ userId: userId, bucketId: bucketId, permCode: 'CREATE' });
+        const permission = await bucketPermissionService.searchPermissions({
+          userId: userId,
+          bucketId: bucketId,
+          permCode: 'CREATE'
+        });
         if (!permission.length) {
           throw new Problem(403, {
             detail: 'User lacks permission to complete this action',
@@ -263,26 +293,45 @@ const controller = {
 
       let s3Response;
       try {
+        // Short circuit if object key length exceeds maximum allowed by S3
+        if (Buffer.byteLength(joinPath(bucketKey, req.currentUpload.filename), 'utf-8') > MAXOBJECTKEYLENGTH) {
+          throw new Problem(422, 'Bucket key or filename too long', req.originalUrl, {
+            detail: 'Bucket key and object filename combined exceed the maximum length allowed by S3',
+            bucketId: bucketId
+          });
+        }
+
         // Preflight S3 Object check
         await storageService.headObject({
           filePath: joinPath(bucketKey, req.currentUpload.filename),
           bucketId: bucketId
         });
 
+        // sync existing file versions and get COMS objectId
+        const objectId =
+          await syncService.syncJob(joinPath(bucketKey, req.currentUpload.filename), bucketId, true, userId);
+
         // Hard short circuit skip file as the object already exists on bucket
-        throw new Problem(409, {
+        throw new Problem(409, 'Bucket already contains object', req.originalUrl, {
           detail: 'Bucket already contains object',
-          instance: req.originalUrl
+          existingObjectId: objectId,
         });
+
       } catch (err) {
         if (err instanceof Problem) throw err; // Rethrow Problem type errors
 
         // Object is soft deleted from the bucket
         if (err.$response?.headers['x-amz-delete-marker']) {
-          throw new Problem(409, {
+
+          // sync existing file versions and get COMS objectId
+          const objectId =
+            await syncService.syncJob(joinPath(bucketKey, req.currentUpload.filename), bucketId, true, userId);
+
+          throw new Problem(409, 'Bucket already contains object', req.originalUrl, {
             detail: 'Bucket already contains object',
-            instance: req.originalUrl
+            existingObjectId: objectId,
           });
+
         }
 
         // Skip upload in the unlikely event we get an unexpected error from headObject
@@ -316,6 +365,11 @@ const controller = {
         }
       }
 
+      const s3Head = await storageService.headObject({
+        filePath: joinPath(bucketKey, req.currentUpload.filename),
+        bucketId: bucketId
+      }).catch(() => ({}));
+
       const dbResponse = await utils.trxWrapper(async (trx) => {
         // Create Object
         const object = await objectService.create({
@@ -330,7 +384,8 @@ const controller = {
           ...data,
           etag: s3Response.ETag,
           s3VersionId: s3VersionId,
-          isLatest: true
+          isLatest: true,
+          lastModifiedDate: s3Head.LastModified ? new Date(s3Head.LastModified).toISOString() : undefined
         }, userId, trx);
         object.versionId = version.id;
 
@@ -373,7 +428,9 @@ const controller = {
       const userId = await userService.getCurrentUserId(getCurrentIdentity(req.currentUser, SYSTEM_USER));
 
       // Source S3 Version to copy from
-      const sourceS3VersionId = await getS3VersionId(req.query.s3VersionId, addDashesToUuid(req.query.versionId), objId);
+      const sourceS3VersionId = await getS3VersionId(
+        req.query.s3VersionId, addDashesToUuid(req.query.versionId), objId
+      );
 
       const source = await storageService.headObject({ filePath: objPath, s3VersionId: sourceS3VersionId, bucketId });
       if (source.ContentLength > MAXCOPYOBJECTLENGTH) {
@@ -420,8 +477,18 @@ const controller = {
       await utils.trxWrapper(async (trx) => {
         // create or update version in DB(if a non-versioned object)
         const version = s3Response.VersionId ?
-          await versionService.copy(sourceS3VersionId, s3Response.VersionId, objId, s3Response.CopyObjectResult?.ETag, userId, trx) :
-          await versionService.update({ ...data, id: objId, etag: s3Response.CopyObjectResult?.ETag, isLatest: true }, userId, trx);
+          await versionService.copy(
+            sourceS3VersionId, s3Response.VersionId, objId, s3Response.CopyObjectResult?.ETag,
+            s3Response.CopyObjectResult?.LastModified, userId, trx
+          ) :
+          await versionService.update({
+            ...data,
+            id: objId,
+            etag: s3Response.CopyObjectResult?.ETag,
+            isLatest: true,
+            lastModifiedDate: s3Response.CopyObjectResult?.LastModified
+              ? new Date(s3Response.CopyObjectResult?.LastModified).toISOString() : undefined
+          }, userId, trx);
         // add metadata to version in DB
         await metadataService.associateMetadata(version.id, getKeyValue(data.metadata), userId, trx);
 
@@ -449,7 +516,9 @@ const controller = {
       const userId = await userService.getCurrentUserId(getCurrentIdentity(req.currentUser, SYSTEM_USER));
 
       // target S3 version to delete
-      const targetS3VersionId = await getS3VersionId(req.query.s3VersionId, addDashesToUuid(req.query.versionId), objId);
+      const targetS3VersionId = await getS3VersionId(
+        req.query.s3VersionId, addDashesToUuid(req.query.versionId), objId
+      );
 
       const data = {
         bucketId: req.currentObject?.bucketId,
@@ -463,24 +532,23 @@ const controller = {
       // if request is to delete a version
       if (data.s3VersionId) {
         // delete version in DB
-        await versionService.delete(objId, s3Response.VersionId, userId);
+        await versionService.delete(objId, s3Response.VersionId);
         // prune tags amd metadata
         await metadataService.pruneOrphanedMetadata();
         await tagService.pruneOrphanedTags();
-        // if other versions in DB, delete object record
+        // if no other versions in DB, delete object record
         const remainingVersions = await versionService.list(objId);
         if (remainingVersions.length === 0) await objectService.delete(objId);
       } else { // else deleting the object
         // if versioning enabled s3Response will contain DeleteMarker: true
         if (s3Response.DeleteMarker) {
           // create DeleteMarker version in DB
-          const deleteMarker = {
+          await versionService.create({
             id: objId,
             deleteMarker: true,
             s3VersionId: s3Response.VersionId,
             isLatest: true
-          };
-          await versionService.create(deleteMarker, userId);
+          }, userId);
         } else { // else object in bucket is not versioned
           // delete object record from DB
           await objectService.delete(objId);
@@ -511,9 +579,15 @@ const controller = {
       const objPath = req.currentObject?.path;
 
       // Target S3 version
-      const targetS3VersionId = await getS3VersionId(req.query.s3VersionId, addDashesToUuid(req.query.versionId), objId);
+      const targetS3VersionId = await getS3VersionId(
+        req.query.s3VersionId, addDashesToUuid(req.query.versionId), objId
+      );
 
-      const sourceObject = await storageService.getObjectTagging({ filePath: objPath, s3VersionId: targetS3VersionId, bucketId: bucketId });
+      const sourceObject = await storageService.getObjectTagging({
+        filePath: objPath,
+        s3VersionId: targetS3VersionId,
+        bucketId: bucketId
+      });
 
       // Generate object subset by subtracting/omitting defined keys via filter/inclusion
       const keysToRemove = req.query.tagset ? Object.keys(req.query.tagset) : [];
@@ -614,7 +688,7 @@ const controller = {
         metadata: metadata && Object.keys(metadata).length ? metadata : undefined
       };
       // if scoping to current user permissions on objects
-      if (config.has('server.privacyMask')) {
+      if (getConfigBoolean('server.privacyMask')) {
         params.userId = await userService.getCurrentUserId(getCurrentIdentity(req.currentUser, SYSTEM_USER));
       }
       const response = await metadataService.fetchMetadataForObject(params);
@@ -643,7 +717,7 @@ const controller = {
         tagset: tagset && Object.keys(tagset).length ? tagset : undefined,
       };
       // if scoping to current user permissions on objects
-      if (config.has('server.privacyMask')) {
+      if (getConfigBoolean('server.privacyMask')) {
         params.userId = await userService.getCurrentUserId(getCurrentIdentity(req.currentUser, SYSTEM_USER));
       }
       const response = await tagService.fetchTagsForObject(params);
@@ -666,7 +740,9 @@ const controller = {
       const objId = addDashesToUuid(req.params.objectId);
 
       // target S3 version
-      const targetS3VersionId = await getS3VersionId(req.query.s3VersionId, addDashesToUuid(req.query.versionId), objId);
+      const targetS3VersionId = await getS3VersionId(
+        req.query.s3VersionId, addDashesToUuid(req.query.versionId), objId
+      );
 
       const data = {
         bucketId: req.currentObject?.bucketId,
@@ -685,6 +761,90 @@ const controller = {
         ...DEFAULTCORS
       })(req, res, () => { });
       res.status(204).end();
+    } catch (e) {
+      next(errorToProblem(SERVICE, e));
+    }
+  },
+
+  /**
+ * @function copyVersion
+ * Copies a previous version of an object and places on top of the version 'stack'.
+ * If no version is provided to copy, the latest existing version will be copied.
+ * @param {object} req Express request object
+ * @param {object} res Express response object
+ * @param {function} next The next callback function
+ * @returns {function} Express middleware function
+ */
+  async copyVersion(req, res, next) {
+    try {
+      const bucketId = req.currentObject?.bucketId;
+      const objId = addDashesToUuid(req.params.objectId);
+      const objPath = req.currentObject?.path;
+      const userId = await userService.getCurrentUserId(getCurrentIdentity(req.currentUser, SYSTEM_USER));
+      let source;
+      // if COMS versionId parameter is provided, get corresponding Version from S3
+      if (req.query.versionId) {
+        const sourceS3VersionId = await getS3VersionId(undefined, addDashesToUuid(req.query.versionId), objId);
+        source = await storageService.headObject({ filePath: objPath, s3VersionId: sourceS3VersionId, bucketId });
+      }
+      // else get most recent Version that is not a delete marker from S3
+      else {
+        const vs = await storageService.listObjectVersion({ filePath: objPath, bucketId });
+        const sourceS3VersionId = vs.Versions
+          .sort((a, b) => new Date(b.LastModified).getTime() - new Date(a.LastModified).getTime())[0].VersionId;
+        source = await storageService.headObject({ filePath: objPath, s3VersionId: sourceS3VersionId, bucketId });
+      }
+
+      if (source.ContentLength > MAXCOPYOBJECTLENGTH) {
+        throw new Error('Cannot copy an object larger than 5GB');
+      }
+      // get existing tags on source object, eg: { 'animal': 'bear', colour': 'black' }
+      const sourceObject = await storageService.getObjectTagging({
+        filePath: objPath,
+        s3VersionId: source.VersionId,
+        bucketId: bucketId
+      });
+      const sourceTags = Object.assign({},
+        ...(sourceObject.TagSet?.map(item => ({ [item.Key]: item.Value })) ?? [])
+      );
+
+      // create new version in S3
+      const data = {
+        bucketId: bucketId,
+        copySource: objPath,
+        filePath: objPath,
+        metadata: source.Metadata,
+        tags: sourceTags,
+        metadataDirective: MetadataDirective.REPLACE,
+        taggingDirective: TaggingDirective.REPLACE,
+        s3VersionId: source.VersionId
+      };
+      const s3Response = await storageService.copyObject(data);
+      let version;
+
+      // update COMS database
+      await utils.trxWrapper(async (trx) => {
+        // create or update version (if a non-versioned object)
+        version = s3Response.VersionId ?
+          await versionService.copy(
+            source.VersionId, s3Response.VersionId, objId, s3Response.CopyObjectResult?.ETag,
+            s3Response.CopyObjectResult?.LastModified, userId, trx
+          ) :
+          await versionService.update({
+            ...data,
+            id: objId,
+            etag: s3Response.CopyObjectResult?.ETag,
+            isLatest: true,
+            lastModifiedDate: s3Response.CopyObjectResult?.LastModified
+              ? new Date(s3Response.CopyObjectResult?.LastModified).toISOString() : undefined
+          }, userId, trx);
+        // add metadata to version in DB
+        await metadataService.associateMetadata(version.id, getKeyValue(data.metadata), userId, trx);
+        // add tags to new version in DB
+        await tagService.associateTags(version.id, getKeyValue(data.tags), userId, trx);
+      });
+
+      res.status(201).json(version);
     } catch (e) {
       next(errorToProblem(SERVICE, e));
     }
@@ -725,7 +885,9 @@ const controller = {
       const objId = addDashesToUuid(req.params.objectId);
 
       // target S3 version
-      const targetS3VersionId = await getS3VersionId(req.query.s3VersionId, addDashesToUuid(req.query.versionId), objId);
+      const targetS3VersionId = await getS3VersionId(
+        req.query.s3VersionId, addDashesToUuid(req.query.versionId), objId
+      );
 
       const data = {
         // TODO: use req.currentObject.bucketId
@@ -736,7 +898,8 @@ const controller = {
 
       // Download via service proxy
       if (req.query.download && req.query.download === DownloadMode.PROXY) {
-        // TODO: Consider if we need a HEAD operation first before doing the actual read on large files for pre-flight caching behavior?
+        // TODO: Consider if we need a HEAD operation first before doing the actual read on large files
+        // for pre-flight caching behavior?
         const response = await storageService.readObject(data);
 
         // Set Headers via CORS library
@@ -789,7 +952,9 @@ const controller = {
       const userId = await userService.getCurrentUserId(getCurrentIdentity(req.currentUser, SYSTEM_USER));
 
       // source S3 version
-      const sourceS3VersionId = await getS3VersionId(req.query.s3VersionId, addDashesToUuid(req.query.versionId), objId);
+      const sourceS3VersionId = await getS3VersionId(
+        req.query.s3VersionId, addDashesToUuid(req.query.versionId), objId
+      );
 
       // get metadata for source version
       const source = await storageService.headObject({ filePath: objPath, s3VersionId: sourceS3VersionId, bucketId });
@@ -828,9 +993,18 @@ const controller = {
       await utils.trxWrapper(async (trx) => {
         // create or update version (if a non-versioned object)
         const version = s3Response.VersionId ?
-          await versionService.copy(sourceS3VersionId, s3Response.VersionId, objId, s3Response.CopyObjectResult?.ETag, userId, trx) :
-
-          await versionService.update({ ...data, id: objId, etag: s3Response.CopyObjectResult?.ETag, isLatest: true }, userId, trx);
+          await versionService.copy(
+            sourceS3VersionId, s3Response.VersionId, objId, s3Response.CopyObjectResult?.ETag,
+            s3Response.CopyObjectResult?.LastModified, userId, trx
+          ) :
+          await versionService.update({
+            ...data,
+            id: objId,
+            etag: s3Response.CopyObjectResult?.ETag,
+            isLatest: true,
+            lastModifiedDate: s3Response.CopyObjectResult?.LastModified
+              ? new Date(s3Response.CopyObjectResult?.LastModified).toISOString() : undefined
+          }, userId, trx);
 
         // add metadata
         await metadataService.associateMetadata(version.id, getKeyValue(data.metadata), userId, trx);
@@ -862,7 +1036,9 @@ const controller = {
       const newTags = Object.entries({ ...req.query.tagset }).map(([k, v]) => ({ Key: k, Value: v }));
 
       // source S3 version
-      const sourceS3VersionId = await getS3VersionId(req.query.s3VersionId, addDashesToUuid(req.query.versionId), objId);
+      const sourceS3VersionId = await getS3VersionId(
+        req.query.s3VersionId, addDashesToUuid(req.query.versionId), objId
+      );
 
       const data = {
         bucketId: req.currentObject?.bucketId,
@@ -913,14 +1089,19 @@ const controller = {
         public: isTruthy(req.query.public),
         active: isTruthy(req.query.active),
         deleteMarker: isTruthy(req.query.deleteMarker),
-        latest: isTruthy(req.query.latest)
+        latest: isTruthy(req.query.latest),
+        permissions: isTruthy(req.query.permissions),
+        page: req.query.page,
+        limit: req.query.limit,
+        sort: req.query.sort,
+        order: req.query.order,
       };
       // if scoping to current user permissions on objects
-      if (config.has('server.privacyMask')) {
+      if (getConfigBoolean('server.privacyMask')) {
         params.userId = await userService.getCurrentUserId(getCurrentIdentity(req.currentUser, SYSTEM_USER));
       }
       const response = await objectService.searchObjects(params);
-      res.status(200).json(response);
+      res.setHeader('X-Total-Rows', response.total).status(200).json(response.data);
     } catch (error) {
       next(error);
     }
@@ -936,13 +1117,26 @@ const controller = {
    */
   async togglePublic(req, res, next) {
     try {
+      const objId = addDashesToUuid(req.params.objectId);
+      const publicFlag = isTruthy(req.query.public) ?? false;
       const userId = await userService.getCurrentUserId(getCurrentIdentity(req.currentUser, SYSTEM_USER), SYSTEM_USER);
+
       const data = {
-        id: addDashesToUuid(req.params.objectId),
-        public: isTruthy(req.query.public) ?? false,
-        userId: userId
+        id: objId,
+        bucketId: req.currentObject?.bucketId,
+        filePath: req.currentObject?.path,
+        public: publicFlag,
+        userId: userId,
+        // TODO: Implement if/when we proceed with version-scoped public permission management
+        // s3VersionId: await getS3VersionId(
+        //   req.query.s3VersionId, addDashesToUuid(req.query.versionId), objId
+        // )
       };
 
+      storageService.putObjectPublic(data).catch(() => {
+        // Gracefully continue even when S3 ACL management operation fails
+        log.warn('Failed to apply ACL permission changes to S3', { function: 'togglePublic', ...data });
+      });
       const response = await objectService.update(data);
 
       res.status(200).json(response);
@@ -961,7 +1155,11 @@ const controller = {
    */
   async updateObject(req, res, next) {
     try {
-      const userId = await userService.getCurrentUserId(getCurrentIdentity(req.currentUser, SYSTEM_USER));
+      let userId = await userService.getCurrentUserId(getCurrentIdentity(req.currentUser, SYSTEM_USER));
+
+      if ((userId === SYSTEM_USER || userId === undefined) && req.currentUser?.bucketSettings) {
+        userId = req.currentUser.bucketSettings.accessKeyId;
+      }
 
       // Preflight existence check for bucketId
       const bucketId = req.currentObject?.bucketId;
@@ -984,66 +1182,56 @@ const controller = {
 
       let s3Response;
       try {
-        // Preflight S3 Object check
-        const headResponse = await storageService.headObject({
+        // Preflight check for object in bucket
+        const vs = await storageService.listObjectVersion({
           filePath: joinPath(bucketKey, filename),
           bucketId: bucketId
         });
-
-        // Skip upload in the unlikely event we get an unexpected response from headObject
-        if (headResponse.$metadata?.httpStatusCode !== 200) {
-          throw new Problem(502, {
-            detail: 'Bucket communication error',
-            instance: req.originalUrl
-          });
-        }
-
-        // Object exists on bucket
-        if (req.currentUpload.contentLength < MAXCOPYOBJECTLENGTH) {
-          log.debug('Uploading with putObject', {
-            contentLength: req.currentUpload.contentLength,
-            function: 'createObject',
-            uploadMethod: 'putObject'
-          });
-          s3Response = await storageService.putObject({ ...data, stream: req });
-        } else if (req.currentUpload.contentLength < MAXFILEOBJECTLENGTH) {
-          log.debug('Uploading with lib-storage', {
-            contentLength: req.currentUpload.contentLength,
-            function: 'createObject',
-            uploadMethod: 'lib-storage'
-          });
-          s3Response = await storageService.upload({ ...data, stream: req });
-        } else {
-          throw new Problem(413, {
-            detail: 'File exceeds maximum 50GB limit',
-            instance: req.originalUrl
-          });
-        }
-      } catch (err) {
-        if (err instanceof Problem) throw err; // Rethrow Problem type errors
-        else if (err.$metadata?.httpStatusCode !== 404) {
-          // An unexpected response from headObject
-          throw new Problem(502, {
-            detail: 'Bucket communication error',
-            instance: req.originalUrl
-          });
-        } else {
-          if (err.$response?.headers['x-amz-delete-marker']) {
-            // Object is soft deleted from the bucket
-            throw new Problem(409, {
-              detail: 'Unable to update soft deleted object',
-              instance: req.originalUrl
+        // if object exists
+        if (Array.isArray(vs.Versions)) {
+          // if smaller file use putObject
+          if (req.currentUpload.contentLength < MAXCOPYOBJECTLENGTH) {
+            log.debug('Uploading with putObject', {
+              contentLength: req.currentUpload.contentLength,
+              function: 'createObject',
+              uploadMethod: 'putObject'
             });
+            s3Response = await storageService.putObject({ ...data, stream: req });
+          }
+          // else use upload command
+          else if (req.currentUpload.contentLength < MAXFILEOBJECTLENGTH) {
+            log.debug('Uploading with lib-storage', {
+              contentLength: req.currentUpload.contentLength,
+              function: 'createObject',
+              uploadMethod: 'lib-storage'
+            });
+            s3Response = await storageService.upload({ ...data, stream: req });
           } else {
-            // Bucket is missing the existing object
-            throw new Problem(409, {
-              detail: 'Bucket does not contain existing object',
+            throw new Problem(413, {
+              detail: 'File exceeds maximum 50GB limit',
               instance: req.originalUrl
             });
           }
-          // TODO: Add in sync operation to update object record in COMS DB?
         }
+        // else no file in bucket
+        else {
+          throw new Problem(409, {
+            detail: 'Bucket does not contain existing object',
+            instance: req.originalUrl
+          });
+        }
+      } catch (error) {
+        throw new Problem(502, {
+          detail: 'Bucket communication error',
+          instance: req.originalUrl
+        });
       }
+
+      // do COMS database updates:
+      const s3Head = await storageService.headObject({
+        filePath: joinPath(bucketKey, req.currentUpload.filename),
+        bucketId: bucketId
+      }).catch(() => ({}));
 
       const dbResponse = await utils.trxWrapper(async (trx) => {
         // Update Object
@@ -1061,22 +1249,28 @@ const controller = {
             ...data,
             etag: s3Response.ETag,
             s3VersionId: s3VersionId,
-            isLatest: true
+            isLatest: true,
+            lastModifiedDate: s3Head.LastModified ? new Date(s3Head.LastModified).toISOString() : undefined
           }, userId, trx);
         } else { // Update existing version when bucket versioning not enabled
           version = await versionService.update({
             ...data,
+            etag: s3Response.ETag,
             s3VersionId: null,
-            etag: s3Response.ETag
+            lastModifiedDate: s3Head.LastModified ? new Date(s3Head.LastModified).toISOString() : undefined
           }, userId, trx);
         }
         object.versionId = version.id;
 
         // Update Metadata
-        if (data.metadata && Object.keys(data.metadata).length) await metadataService.associateMetadata(version.id, getKeyValue(data.metadata), userId, trx);
+        if (data.metadata && Object.keys(data.metadata).length) {
+          await metadataService.associateMetadata(version.id, getKeyValue(data.metadata), userId, trx);
+        }
 
         // Update Tags
-        if (data.tags && Object.keys(data.tags).length) await tagService.replaceTags(version.id, getKeyValue(data.tags), userId, trx);
+        if (data.tags && Object.keys(data.tags).length) {
+          await tagService.replaceTags(version.id, getKeyValue(data.tags), userId, trx);
+        }
 
         return object;
       });

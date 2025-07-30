@@ -11,7 +11,7 @@ const utils = {
    */
   filterOneOrMany(query, value, column) {
     if (value) {
-      if (Array.isArray(value) && value.length) {
+      if (Array.isArray(value)) {
         query.whereIn(column, value);
       } else {
         query.where(column, value);
@@ -59,7 +59,9 @@ const utils = {
 
   toArray(values) {
     if (values) {
-      return Array.isArray(values) ? values.filter(p => p && p.trim().length > 0) : [values].filter(p => p && p.trim().length > 0);
+      return Array.isArray(values)
+        ? values.filter(p => p && p.trim().length > 0)
+        : [values].filter(p => p && p.trim().length > 0);
     }
     return [];
   },

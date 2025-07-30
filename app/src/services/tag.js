@@ -11,7 +11,8 @@ const service = {
    * @function replaceTags
    * Makes the incoming list of tags the definitive set associated with versionId
    * @param {string} versionId The uuid id column from version table
-   * @param {object[]} tags Incoming array of tageset objects to add for this version (eg: [{ key: 'a', value: '1'}, {key: 'B', value: '2'}])
+   * @param {object[]} tags Incoming array of tageset objects to add for this version
+   * (eg: [{ key: 'a', value: '1'}, {key: 'B', value: '2'}])
    * @param {string} [currentUserId=SYSTEM_USER] The optional userId uuid actor; defaults to system user if unspecified
    * @param {object} [etrx=undefined] An optional Objection Transaction object
    * @returns {Promise<object>} The result of running the insert operation
@@ -221,7 +222,8 @@ const service = {
 
   /**
   * @function fetchTagsForObject
-  * Fetch matching tags on latest version of provided objects, optionally scoped to a user's object/bucket READ permission
+  * Fetch matching tags on latest version of provided objects,
+  * optionally scoped to a user's object/bucket READ permission
   * @param {string[]} [params.bucketIds] An array of uuids representing buckets
   * @param {string[]} [params.objectIds] An array of uuids representing objects
   * @param {object} [params.tagset] Optional object of tags key/value pairs
@@ -231,7 +233,7 @@ const service = {
   fetchTagsForObject: (params) => {
     return ObjectModel.query()
       .select('object.id AS objectId', 'object.bucketId as bucketId')
-      .allowGraph('version.tag')
+      .allowGraph('[bucketPermission, objectPermission, version.tag]')
       .withGraphJoined('version.tag')
       // get latest version that isn't a delete marker by default
       .modifyGraph('version', builder => {
@@ -260,7 +262,7 @@ const service = {
       .then(result => result.map(row => {
         return {
           objectId: row.objectId,
-          tagset: row.version[0].tag
+          tagset: row.version && row.version.length ? row.version[0].tag : []
         };
       }));
   },
@@ -300,6 +302,13 @@ const service = {
               .allowGraph('object')
               .withGraphJoined('object')
               .modifyGraph('object', query => { query.modify('hasPermission', params.userId, 'READ'); })
+              .whereNotNull('object.id');
+          }
+          if (params.bucketId) {
+            query
+              .allowGraph('object')
+              .withGraphJoined('object')
+              .modifyGraph('object', query => { query.modify('filterBucketIds', params.bucketId); })
               .whereNotNull('object.id');
           }
         })

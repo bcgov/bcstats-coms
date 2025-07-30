@@ -4,7 +4,8 @@ const { NIL: SYSTEM_USER } = require('uuid');
 
 const config = require('config');
 
-const { DEFAULTREGION } = require('../components/constants');
+const { DEFAULTREGION, Permissions } = require('../components/constants');
+const utils = require('../db/models/utils');
 const errorToProblem = require('../components/errorToProblem');
 const log = require('../components/log')(module.filename);
 const {
@@ -17,7 +18,7 @@ const {
 } = require('../components/utils');
 const { redactSecrets } = require('../db/models/utils');
 
-const { bucketService, storageService, userService } = require('../services');
+const { bucketService, storageService, userService, bucketPermissionService } = require('../services');
 
 const SERVICE = 'BucketService';
 const secretFields = ['accessKeyId', 'secretAccessKey'];
@@ -76,7 +77,7 @@ const controller = {
    * @throws A conflict error problem if the bucket is not reachable
    */
   async _validateCredentials(credentials) {
-    if (credentials.adminPass != config.get('server.adminpass')){
+    if (credentials.adminPass != config.get('server.adminpass')) {
       throw new Problem(409, {
         details: 'Failure validating admin password',
       });
@@ -97,7 +98,7 @@ const controller = {
       log.warn(`Failure to validate bucket credentials: ${e.message}`, {
         function: '_validateCredentials',
       });
-      throw new Problem(409, {
+      throw new Problem(403, {
         detail: 'Unable to validate supplied credentials for the bucket',
       });
     }
@@ -125,12 +126,96 @@ const controller = {
       await controller._validateCredentials(data);
       data.userId = await userService.getCurrentUserId(getCurrentIdentity(req.currentUser, SYSTEM_USER));
 
+      // if permCodes array (eg: ['READ', 'UPDATE'] or []) was provided use that (de-duped),
+      // otherwise assign all permissions
+      data.permCodes = req.body.permCodes ? Array.from(new Set(req.body.permCodes)) : Object.values(Permissions);
+
       response = await bucketService.create(data);
     } catch (e) {
       // If bucket exists, check if credentials precisely match
       if (e instanceof UniqueViolationError) {
-        // Grant all permissions if credentials precisely match
+        // Grant permissions if credentials precisely match
         response = await bucketService.checkGrantPermissions(data).catch(permErr => {
+          next(new Problem(409, { detail: permErr.message, instance: req.originalUrl }));
+        });
+      } else {
+        next(errorToProblem(SERVICE, e));
+      }
+    } finally {
+      if (response) res.status(201).json(redactSecrets(response, secretFields));
+    }
+  },
+
+  /**
+   * @function createBucketChild
+   * Creates a child bucket
+   * @param {object} req Express request object
+   * @param {object} res Express response object
+   * @param {function} next The next callback function
+   * @returns {function} Express middleware function
+   * @throws The error encountered upon failure
+   */
+  async createBucketChild(req, res, next) {
+
+    // Get Parent bucket data
+    const parentBucketId = addDashesToUuid(req.params.bucketId);
+    const parentBucket = await bucketService.read(parentBucketId);
+
+    // Check new child key length
+    const childKey = joinPath(stripDelimit(parentBucket.key), stripDelimit(req.body.subKey));
+    if (childKey.length > 255) {
+      throw new Problem(422, {
+        detail: 'New derived key exceeds maximum length of 255',
+        instance: req.originalUrl,
+        key: childKey
+      });
+    }
+
+    const childBucket = {
+      bucketName: req.body.bucketName,
+      accessKeyId: parentBucket.accessKeyId,
+      bucket: parentBucket.bucket,
+      endpoint: parentBucket.endpoint,
+      key: childKey,
+      secretAccessKey: parentBucket.secretAccessKey,
+      region: parentBucket.region ?? undefined,
+      active: parentBucket.active,
+      permCodes: []
+    };
+
+    let response = undefined;
+    try {
+
+      // Check for credential accessibility/validity
+      await controller._validateCredentials(childBucket);
+      childBucket.userId = await userService.getCurrentUserId(getCurrentIdentity(req.currentUser, SYSTEM_USER));
+
+      const parentPermissions = await bucketPermissionService.searchPermissions({ bucketId: parentBucket.bucketId });
+
+      response = await utils.trxWrapper(async (trx) => {
+        // Create child bucket
+        const childBucketResp = await bucketService.create(childBucket, trx);
+
+        // Add parent permissions to child bucket
+        if (parentPermissions.length > 0)
+          await bucketPermissionService.addPermissions(
+            childBucketResp.bucketId, parentPermissions, childBucket.userId, trx);
+
+        return childBucketResp;
+      });
+    }
+    catch (e) {
+      // If child bucket exists..
+      if (e instanceof UniqueViolationError) {
+        // get all permissions that user has on parent bucket
+        childBucket.permCodes = childBucket.userId !== SYSTEM_USER ?
+          (await bucketPermissionService.searchPermissions({
+            bucketId: parentBucket.bucketId,
+            userId: childBucket.userId
+          })).map(p => p.permCode) : [];
+
+        // Grant permissions if credentials precisely match
+        response = await bucketService.checkGrantPermissions(childBucket).catch(permErr => {
           next(new Problem(403, { detail: permErr.message, instance: req.originalUrl }));
         });
       } else {
@@ -143,7 +228,8 @@ const controller = {
 
   /**
    * @function deleteBucket
-   * Deletes the bucket
+   * Deletes a bucket
+   * Recursive option will delete all sub-folders (where current user has DELETE permission)
    * @param {object} req Express request object
    * @param {object} res Express response object
    * @param {function} next The next callback function
@@ -152,7 +238,44 @@ const controller = {
   async deleteBucket(req, res, next) {
     try {
       const bucketId = addDashesToUuid(req.params.bucketId);
-      await bucketService.delete(bucketId);
+      const parentBucket = await bucketService.read(bucketId);
+      let buckets = [parentBucket];
+
+      // if doing recursive delete
+      if (isTruthy(req.query.recursive)) {
+        // if current user is OIDC
+        const userId = await userService.getCurrentUserId(
+          getCurrentIdentity(req.currentUser, SYSTEM_USER), SYSTEM_USER);
+        if (userId !== SYSTEM_USER) {
+          const dbChildBuckets = await bucketService.searchChildBuckets(parentBucket, true, userId);
+          // if there are sub-folders
+          if (dbChildBuckets.length > 0) {
+            const checkForDelete = obj => obj.permCode === 'DELETE';
+            const dbChildBucketsWithDelete = dbChildBuckets.filter(b =>
+              b.bucketPermission.some(checkForDelete));
+            // if user has DELETE on all subfolders
+            if (dbChildBucketsWithDelete.length === dbChildBuckets.length) {
+              buckets = buckets.concat(dbChildBucketsWithDelete);
+            } else {
+              throw new Problem(403, {
+                detail: 'User lacks DELETE permission for some sub-folders',
+                instance: req.originalUrl,
+              });
+            }
+          }
+        }
+        // else basic auth
+        else {
+          const dbChildBuckets = await bucketService.searchChildBuckets(parentBucket);
+          buckets = buckets.concat(dbChildBuckets);
+        }
+      }
+      // do delete
+      await utils.trxWrapper(async (trx) => {
+        return await Promise.all(
+          buckets.map(bucket => bucketService.delete(bucket.bucketId, trx))
+        );
+      });
       res.status(204).end();
     } catch (e) {
       next(errorToProblem(SERVICE, e));
@@ -242,7 +365,12 @@ const controller = {
         endpoint: req.body.endpoint ? stripDelimit(req.body.endpoint) : currentBucket.endpoint
       });
 
-      const userId = await userService.getCurrentUserId(getCurrentIdentity(req.currentUser, SYSTEM_USER), SYSTEM_USER);
+      let userId = await userService.getCurrentUserId(getCurrentIdentity(req.currentUser, SYSTEM_USER), SYSTEM_USER);
+
+      if ((userId === SYSTEM_USER || userId === undefined) && req.currentUser?.bucketSettings) {
+        userId = req.currentUser.bucketSettings.accessKeyId;
+      }
+
       const response = await bucketService.update({
         bucketId: bucketId,
         bucketName: req.body.bucketName,

@@ -34,8 +34,10 @@ const data = {
   secretAccessKey: 'secretaccesskey',
   region: 'region',
   active: 'true',
+  permCodes: ['READ'],
   createdBy: SYSTEM_USER,
-  userId: SYSTEM_USER
+  userId: SYSTEM_USER,
+  lastSyncRequestedDate: new Date().toISOString()
 };
 
 beforeEach(() => {
@@ -162,7 +164,8 @@ describe('update', () => {
       secretAccessKey: data.secretAccessKey,
       region: data.region,
       active: data.active,
-      updatedBy: data.userId
+      updatedBy: data.userId,
+      lastSyncRequestedDate: data.lastSyncRequestedDate
     });
     expect(bucketTrx.commit).toHaveBeenCalledTimes(1);
   });

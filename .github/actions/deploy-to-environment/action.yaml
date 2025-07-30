@@ -25,20 +25,36 @@ inputs:
   openshift_token:
     description: Openshift Service Account Token
     required: true
+  deploy_postgres:
+    description: Should Postgres database be installed for this release
+    default: "true"
 
 runs:
   using: composite
   steps:
     - name: Checkout repository
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
-    - name: Login to OpenShift Cluster
-      uses: redhat-actions/oc-login@v1
+    - name: Install CLI tools from OpenShift Mirror
+      uses: redhat-actions/openshift-tools-installer@v1
       with:
-        openshift_server_url: ${{ inputs.openshift_server }}
-        openshift_token: ${{ inputs.openshift_token }}
-        insecure_skip_tls_verify: true
-        namespace: ${{ inputs.namespace_prefix }}-${{ inputs.namespace_environment }}
+        oc: "4"
+
+    - name: Login to OpenShift and select project
+      shell: bash
+      run: |
+        # OC Login
+        OC_TEMP_TOKEN=$(curl -k -X POST ${{ inputs.openshift_server }}/api/v1/namespaces/${{ inputs.namespace_prefix }}-${{ inputs.namespace_environment }}/serviceaccounts/pipeline/token --header "Authorization: Bearer ${{ inputs.openshift_token }}" -d '{"spec": {"expirationSeconds": 600}}' -H 'Content-Type: application/json; charset=utf-8' | jq -r '.status.token' )
+        oc login --token=$OC_TEMP_TOKEN --server=${{ inputs.openshift_server }}
+        # move to project context
+        oc project ${{ inputs.namespace_prefix }}-${{ inputs.namespace_environment }}
+
+    - name: set lower case owner name
+      shell: bash
+      run: |
+        echo "OWNER_LC=${OWNER,,}" >>${GITHUB_ENV}
+      env:
+        OWNER: "${{ github.repository_owner }}"
 
     - name: Helm Deploy
       shell: bash
@@ -47,10 +63,12 @@ runs:
         --namespace ${{ inputs.namespace_prefix }}-${{ inputs.namespace_environment }}
         --repo https://bcgov.github.io/common-object-management-service
         --values ./.github/environments/values.${{ inputs.environment }}.yaml
-        --set image.repository=ghcr.io/${{ github.repository_owner }}
+        --set image.repository=ghcr.io/$OWNER_LC
         --set image.tag=sha-$(git rev-parse --short HEAD)
         --set route.host=${{ inputs.acronym }}-${{ inputs.namespace_environment }}-${{ inputs.job_name }}.apps.silver.devops.gov.bc.ca
-        --timeout 10m
+        --set postgres.name=postgres-${{ inputs.job_name }}
+        --set postgres.enabled=${{ inputs.deploy_postgres }}
+        --timeout 15m
         --wait
 
     - name: Wait on Deployment

@@ -1,6 +1,6 @@
 const baseJoi = require('joi');
 
-const { EMAILREGEX, Permissions } = require('../components/constants');
+const { EMAILREGEX, Permissions, SortOrder } = require('../components/constants');
 
 /**
  * @constant Joi
@@ -50,8 +50,9 @@ const type = {
    * @param {number} [options.minValueStringLength=1] Optional minimum string length of metadata value allowed,
    * @returns {object} Joi object
    */
+  // TODO: Simplify by changing from arrow function to property
   metadata: ({ minKeyCount = 0, minValueStringLength = 1 } = {}) => Joi.object()
-    .pattern(/^x-amz-meta-.{1,255}$/i, Joi.string().min(minValueStringLength).max(255), { matches: Joi.array().min(minKeyCount) })
+    .pattern(/^x-amz-meta-\S+$/i, Joi.string().min(minValueStringLength), { matches: Joi.array().min(minKeyCount) })
     .unknown(),
 
   /**
@@ -63,6 +64,7 @@ const type = {
    * (default of 9 because COMS also adds a `coms-id` tag by default)
    * @returns {object} Joi object
    */
+  // TODO: Simplify by changing from arrow function to property
   tagset: ({ maxKeyCount = 9, minKeyCount = 0, minValueStringLength = 0 } = {}) => Joi.object()
     .pattern(
       /^(?!coms-id$).{1,255}$/, // don't allow key 'coms-id'
@@ -79,6 +81,35 @@ const scheme = {
   guid: oneOrMany(type.uuidv4),
 
   string: oneOrMany(Joi.string().max(255)),
+
+  pagination: (sortList) => ({
+    page: Joi.alternatives()
+      .conditional('limit', {
+        not: true,
+        then: Joi
+          .number()
+          .min(1)
+          .required()
+          .messages({
+            'any.required': '`Must specify page number`',
+          }),
+        otherwise: Joi.number().min(1)
+      }),
+    limit: Joi.alternatives()
+      .conditional('page', {
+        not: true,
+        then: Joi
+          .number()
+          .min(1)
+          .required()
+          .messages({
+            'any.required': '`Must specify page limit`',
+          }),
+        otherwise: Joi.number().min(1)
+      }),
+    sort: Joi.string().valid(...sortList),
+    order: Joi.string().valid(...Object.values(SortOrder)),
+  }),
 
   permCode: oneOrMany(Joi.string().valid(...Object.values(Permissions)))
 };

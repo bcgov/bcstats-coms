@@ -18,24 +18,46 @@ jest.mock('../../../src/db/models/tables/version', () => ({
   query: jest.fn(),
   returning: jest.fn(),
   throwIfNotFound: jest.fn(),
-  where: jest.fn()
+  update: jest.fn(),
+  updateAndFetchById: jest.fn(),
+  where: jest.fn(),
+  whereNot: jest.fn()
 }));
 
+const validUuidv4 = '3f4da093-6399-4711-8765-36ec5f8017c2';
+
 const service = require('../../../src/services/version');
-// const { version } = require('winston');
+const objectService = require('../../../src/services/object');
+const storageService = require('../../../src/services/storage');
 
 beforeEach(() => {
   jest.clearAllMocks();
   resetModel(Version, versionTrx);
 });
 
+afterAll(() => {
+  jest.clearAllMocks();
+});
+
 describe('copy', () => {
-  // skipping these because we don't currently mock the reponse form a query
-  it.skip('Creates a new version db record from an existing record', async () => {
-    await service.copy(VERSION_ID, S3_VERSION_ID, OBJECT_ID, ETAG, SYSTEM_USER);
+  const LAST_MODIFIED = new Date().toString();
+  const removeDuplicateLatestSpy = jest.spyOn(service, 'removeDuplicateLatest');
+
+  beforeEach(() => {
+    removeDuplicateLatestSpy.mockReset();
+  });
+
+  afterAll(() => {
+    removeDuplicateLatestSpy.mockRestore();
+  });
+
+  it('Creates a new version db record from an existing record', async () => {
+    removeDuplicateLatestSpy.mockResolvedValue([]);
+
+    await service.copy(VERSION_ID, S3_VERSION_ID, OBJECT_ID, ETAG, LAST_MODIFIED, SYSTEM_USER);
 
     expect(Version.startTransaction).toHaveBeenCalledTimes(1);
-    expect(Version.query).toHaveBeenCalledTimes(3);
+    expect(Version.query).toHaveBeenCalledTimes(2);
     expect(Version.query).toHaveBeenCalledWith(expect.anything());
     expect(Version.where).toHaveBeenCalledTimes(1);
     expect(Version.where).toBeCalledWith(
@@ -52,15 +74,21 @@ describe('copy', () => {
         objectId: OBJECT_ID,
         mimeType: undefined,
         deleteMarker: undefined,
-        createdBy: SYSTEM_USER
+        createdBy: SYSTEM_USER,
+        lastModifiedDate: new Date(LAST_MODIFIED).toISOString()
       })
     );
     expect(Version.insert).toHaveBeenCalledTimes(1);
+    expect(Version.returning).toHaveBeenCalledTimes(1);
+    expect(Version.returning).toHaveBeenCalledWith('*');
     expect(versionTrx.commit).toHaveBeenCalledTimes(1);
+    expect(removeDuplicateLatestSpy).toHaveBeenCalledTimes(1);
   });
 
-  it.skip('Creates a new version db record from an existing record - no sourceVersionId provided', async () => {
-    await service.copy(undefined, S3_VERSION_ID, OBJECT_ID, ETAG, SYSTEM_USER);
+  it('Creates a new version db record from an existing record - no sourceVersionId provided', async () => {
+    removeDuplicateLatestSpy.mockResolvedValue([]);
+
+    await service.copy(undefined, S3_VERSION_ID, OBJECT_ID, ETAG, LAST_MODIFIED, SYSTEM_USER);
 
     expect(Version.startTransaction).toHaveBeenCalledTimes(1);
     expect(Version.query).toHaveBeenCalledTimes(2);
@@ -72,15 +100,27 @@ describe('copy', () => {
       })
     );
     expect(Version.orderBy).toHaveBeenCalledTimes(1);
+    expect(Version.orderBy).toHaveBeenCalledWith(expect.arrayContaining([
+      { column: 'createdAt', order: 'desc' },
+      { column: 'updatedAt', order: 'desc', nulls: 'last' }
+    ]));
     expect(Version.first).toHaveBeenCalledTimes(1);
     expect(Version.insert).toHaveBeenCalledTimes(1);
+    expect(Version.returning).toHaveBeenCalledTimes(1);
+    expect(Version.returning).toHaveBeenCalledWith('*');
     expect(versionTrx.commit).toHaveBeenCalledTimes(1);
+    expect(removeDuplicateLatestSpy).toHaveBeenCalledTimes(1);
   });
 });
 
 describe('create', () => {
   it('Saves a version of an object', async () => {
-    await service.create({ s3VersionId: S3_VERSION_ID, mimeType: 'mimeType', id: OBJECT_ID, deleteMarker: 'deleteMarker' }, SYSTEM_USER);
+    await service.create({
+      s3VersionId: S3_VERSION_ID,
+      mimeType: 'mimeType',
+      id: OBJECT_ID,
+      deleteMarker: 'deleteMarker'
+    }, SYSTEM_USER);
 
     expect(Version.startTransaction).toHaveBeenCalledTimes(1);
     expect(Version.query).toHaveBeenCalledTimes(1);
@@ -102,7 +142,19 @@ describe('create', () => {
 });
 
 describe('delete', () => {
-  it.skip('Delete a version record of an object', async () => {
+  const updateIsLatestSpy = jest.spyOn(service, 'updateIsLatest');
+
+  beforeEach(() => {
+    updateIsLatestSpy.mockReset();
+  });
+
+  afterAll(() => {
+    updateIsLatestSpy.mockRestore();
+  });
+
+  it('Delete a version record of an object', async () => {
+    updateIsLatestSpy.mockResolvedValue({});
+
     await service.delete(OBJECT_ID, VERSION_ID);
 
     expect(Version.startTransaction).toHaveBeenCalledTimes(1);
@@ -116,6 +168,8 @@ describe('delete', () => {
     expect(Version.returning).toBeCalledWith('*');
     expect(Version.throwIfNotFound).toHaveBeenCalledTimes(1);
     expect(versionTrx.commit).toHaveBeenCalledTimes(1);
+    expect(updateIsLatestSpy).toHaveBeenCalledTimes(1);
+    expect(updateIsLatestSpy).toHaveBeenCalledWith(OBJECT_ID, expect.anything());
   });
 });
 
@@ -206,5 +260,149 @@ describe('update', () => {
     expect(Version.first).toHaveBeenCalledTimes(1);
     expect(Version.returning).toHaveBeenCalledTimes(1);
     expect(versionTrx.commit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('updateIsLatest', () => {
+  const listAllObjectVersionsSpy = jest.spyOn(storageService, 'listAllObjectVersions');
+  const objectSpy = jest.spyOn(objectService, 'read');
+
+  beforeEach(() => {
+    listAllObjectVersionsSpy.mockReset();
+    objectSpy.mockReset();
+  });
+
+  afterAll(() => {
+    listAllObjectVersionsSpy.mockRestore();
+    objectSpy.mockRestore();
+  });
+
+  it('Updates a version of an object if it is the latest', async () => {
+    const versionSpy = jest.spyOn(service, 'removeDuplicateLatest');
+    versionSpy.mockResolvedValueOnce(true);
+    listAllObjectVersionsSpy.mockResolvedValue({
+      DeleteMarkers: [{}],
+      Versions: [{ IsLatest: true, VersionId: validUuidv4 }]
+    });
+    objectSpy.mockResolvedValue({
+      path: '/test',
+      bucketId: '0000-0000'
+    });
+
+    await service.updateIsLatest(OBJECT_ID);
+
+    expect(Version.startTransaction).toHaveBeenCalledTimes(1);
+    expect(Version.query).toHaveBeenCalledTimes(2);
+    expect(Version.where).toHaveBeenCalledTimes(1);
+    expect(Version.where).toHaveBeenCalledWith(
+      {
+        objectId: OBJECT_ID,
+        s3VersionId: validUuidv4
+      }
+    );
+    expect(Version.updateAndFetchById).toHaveBeenCalledTimes(1);
+    expect(Version.first).toHaveBeenCalledTimes(1);
+    expect(versionSpy).toHaveBeenCalledTimes(1);
+    expect(versionTrx.commit).toHaveBeenCalledTimes(1);
+  });
+
+  it('Does not update if file is not the latest', async () => {
+    const versionSpy = jest.spyOn(service, 'removeDuplicateLatest');
+    versionSpy.mockResolvedValueOnce(true);
+    listAllObjectVersionsSpy.mockResolvedValue({
+      DeleteMarkers: [{}],
+      Versions: [
+        { IsLatest: true, VersionId: validUuidv4 },
+      ]
+    });
+    objectSpy.mockResolvedValue({
+      path: '/test',
+      bucketId: '0000-0000'
+    });
+    Version.throwIfNotFound.mockResolvedValue({ isLatest: true });
+
+    await service.updateIsLatest(OBJECT_ID);
+
+    expect(Version.startTransaction).toHaveBeenCalledTimes(1);
+    expect(Version.query).toHaveBeenCalledTimes(1);
+    expect(Version.first).toHaveBeenCalledTimes(1);
+    expect(Version.where).toHaveBeenCalledTimes(1);
+    expect(Version.where).toHaveBeenCalledWith(
+      {
+        objectId: OBJECT_ID,
+        s3VersionId: validUuidv4
+      }
+    );
+    expect(Version.updateAndFetchById).toHaveBeenCalledTimes(0);
+
+    expect(versionSpy).toHaveBeenCalledTimes(1);
+    expect(versionTrx.commit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('removeDuplicateLatest', () => {
+  const listAllObjectVersionsSpy = jest.spyOn(storageService, 'listAllObjectVersions');
+  const objectSpy = jest.spyOn(objectService, 'read');
+
+  beforeEach(() => {
+    listAllObjectVersionsSpy.mockReset();
+    objectSpy.mockReset();
+  });
+
+  afterAll(() => {
+    listAllObjectVersionsSpy.mockRestore();
+    objectSpy.mockRestore();
+  });
+
+  it('sets all other versions to isLatest=false', async () => {
+    listAllObjectVersionsSpy.mockResolvedValue({
+      DeleteMarkers: [{}],
+      Versions: [{ IsLatest: true, VersionId: validUuidv4 }]
+    });
+    objectSpy.mockResolvedValue({
+      path: '/test',
+      bucketId: '0000-0000'
+    });
+    Version.where.mockResolvedValueOnce([{ isLatest: true }, { isLatest: true }]);
+
+    await service.removeDuplicateLatest(validUuidv4, OBJECT_ID);
+
+    expect(Version.startTransaction).toHaveBeenCalledTimes(1);
+    expect(Version.query).toHaveBeenCalledTimes(2);
+    expect(Version.update).toHaveBeenCalledTimes(1);
+
+    expect(Version.where).toHaveBeenCalledTimes(1);
+    expect(Version.where).toHaveBeenCalledWith('objectId', OBJECT_ID);
+
+    expect(Version.whereNot).toHaveBeenCalledTimes(1);
+    expect(Version.whereNot).toHaveBeenCalledWith({ 'id': validUuidv4 });
+
+    expect(Version.andWhere).toHaveBeenCalledTimes(2);
+    expect(Version.andWhere).toHaveBeenCalledWith('objectId', OBJECT_ID);
+    expect(Version.andWhere).toHaveBeenCalledWith({ 'isLatest': true });
+  });
+
+  it('does not set other versions to false', async () => {
+    listAllObjectVersionsSpy.mockResolvedValue({
+      DeleteMarkers: [{}],
+      Versions: [{ IsLatest: false, VersionId: validUuidv4 }]
+    });
+    objectSpy.mockResolvedValue({
+      path: '/test',
+      bucketId: '0000-0000'
+    });
+    Version.where.mockResolvedValueOnce([{ isLatest: false }, { isLatest: false }]);
+
+    await service.removeDuplicateLatest(validUuidv4, OBJECT_ID);
+
+    expect(Version.startTransaction).toHaveBeenCalledTimes(1);
+    expect(Version.query).toHaveBeenCalledTimes(1);
+
+    expect(Version.where).toHaveBeenCalledTimes(1);
+    expect(Version.where).toHaveBeenCalledWith('objectId', OBJECT_ID);
+
+    expect(Version.update).toHaveBeenCalledTimes(0);
+    expect(Version.whereNot).toHaveBeenCalledTimes(0);
+    expect(Version.andWhere).toHaveBeenCalledTimes(0);
   });
 });

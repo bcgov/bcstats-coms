@@ -44,6 +44,9 @@ const schema = {
         permCode: Joi.string().required().valid(...Object.values(Permissions)),
       }).required()
     ).required(),
+    query: Joi.object({
+      recursive: type.truthy,
+    })
   },
 
   removePermissions: {
@@ -53,6 +56,7 @@ const schema = {
     query: Joi.object({
       userId: scheme.guid,
       permCode: scheme.permCode,
+      recursive: type.truthy
     })
   }
 };

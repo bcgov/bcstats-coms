@@ -1,3 +1,5 @@
+const { NIL: SYSTEM_USER } = require('uuid');
+
 const { resetModel, trxBuilder } = require('../../common/helper');
 const utils = require('../../../src/db/models/utils');
 const ObjectModel = require('../../../src/db/models/tables/objectModel');
@@ -11,8 +13,13 @@ jest.mock('../../../src/db/models/tables/objectModel', () => ({
 
 const versionTrx = trxBuilder();
 jest.mock('../../../src/db/models/tables/version', () => ({
+  delete: jest.fn(),
+  query: jest.fn(),
   startTransaction: jest.fn(),
-  then: jest.fn()
+  then: jest.fn(),
+  where: jest.fn(),
+  whereIn: jest.fn(),
+  whereNotNull: jest.fn(),
 }));
 
 const {
@@ -57,11 +64,15 @@ afterAll(() => { // Mockrestores must only happen after suite is completed
 });
 
 describe('_deriveObjectId', () => {
+
+  const existsSpy = jest.spyOn(objectService, 'exists');
+
   describe('Regular S3 Object', () => {
-    it('Returns an existing coms-id if valid', async () => {
+    it('Returns an existing coms-id if valid and doesn\'t already exist in COMS', async () => {
       getObjectTaggingSpy.mockResolvedValue({
         TagSet: [{ Key: 'coms-id', Value: validUuidv4 }]
       });
+      existsSpy.mockResolvedValue(false);
 
       const result = await service._deriveObjectId({}, path, bucketId);
 
@@ -77,10 +88,37 @@ describe('_deriveObjectId', () => {
       expect(putObjectTaggingSpy).toHaveBeenCalledTimes(0);
     });
 
+    it('Returns a new uuid and removes coms-id tag if it already exists in COMS', async () => {
+      getObjectTaggingSpy.mockResolvedValue({
+        TagSet: [{ Key: 'coms-id', Value: validUuidv4 }]
+      });
+      existsSpy.mockResolvedValue(true);
+      jest.spyOn(storageService, 'putObjectTagging').mockImplementation(() => Promise.resolve());
+
+      const result = await service._deriveObjectId({}, path, bucketId);
+
+      expect(result).toBeTruthy();
+      expect(typeof result).toBe('string');
+      expect(result).not.toMatch(validUuidv4);
+      expect(getObjectTaggingSpy).toHaveBeenCalledTimes(1);
+      expect(getObjectTaggingSpy).toHaveBeenCalledWith(expect.objectContaining({
+        filePath: path,
+        bucketId: bucketId
+      }));
+      expect(listAllObjectVersionsSpy).toHaveBeenCalledTimes(0);
+      expect(putObjectTaggingSpy).toHaveBeenCalledTimes(1);
+      expect(putObjectTaggingSpy).toHaveBeenCalledWith({
+        filePath: path,
+        bucketId: bucketId,
+        tags: [{ Key: 'coms-id', Value: expect.not.stringMatching(validUuidv4) }]
+      });
+    });
+
     it('Returns a new uuid if invalid and pushes tags when less than 10 present', async () => {
       getObjectTaggingSpy.mockResolvedValue({
         TagSet: [{ Key: 'coms-id', Value: 'garbage' }]
       });
+      putObjectTaggingSpy.mockResolvedValue(true);
 
       const result = await service._deriveObjectId({}, path, bucketId);
 
@@ -101,8 +139,33 @@ describe('_deriveObjectId', () => {
       }));
     });
 
+
     it('Returns a new uuid if unavailable and pushes tags when less than 10 present', async () => {
       getObjectTaggingSpy.mockResolvedValue({ TagSet: [] });
+      putObjectTaggingSpy.mockResolvedValue(true);
+
+      const result = await service._deriveObjectId({}, path, bucketId);
+
+      expect(result).toBeTruthy();
+      expect(typeof result).toBe('string');
+      expect(result).toMatch(uuidv4Regex);
+      expect(getObjectTaggingSpy).toHaveBeenCalledTimes(1);
+      expect(getObjectTaggingSpy).toHaveBeenCalledWith(expect.objectContaining({
+        filePath: path,
+        bucketId: bucketId
+      }));
+      expect(listAllObjectVersionsSpy).toHaveBeenCalledTimes(0);
+      expect(putObjectTaggingSpy).toHaveBeenCalledTimes(1);
+      expect(putObjectTaggingSpy).toHaveBeenCalledWith(expect.objectContaining({
+        filePath: path,
+        bucketId: bucketId,
+        tags: expect.any(Array)
+      }));
+    });
+
+    it('Returns a new uuid if unavailable and continues when unable to write to S3', async () => {
+      getObjectTaggingSpy.mockResolvedValue({ TagSet: [] });
+      putObjectTaggingSpy.mockRejectedValue({ message: 'nope' });
 
       const result = await service._deriveObjectId({}, path, bucketId);
 
@@ -258,7 +321,9 @@ describe('syncJob', () => {
     expect(syncVersionsSpy).toHaveBeenCalledTimes(1);
     expect(syncVersionsSpy).toHaveBeenCalledWith(expect.any(Object), expect.any(String), expect.any(Object));
     expect(syncTagsSpy).toHaveBeenCalledTimes(1);
-    expect(syncTagsSpy).toHaveBeenCalledWith(expect.any(Object), path, bucketId, expect.any(String), expect.any(Object));
+    expect(syncTagsSpy).toHaveBeenCalledWith(
+      expect.any(Object), path, bucketId, expect.any(String), expect.any(Object)
+    );
     expect(syncMetadataSpy).toHaveBeenCalledTimes(0);
   });
 
@@ -276,9 +341,13 @@ describe('syncJob', () => {
     expect(syncVersionsSpy).toHaveBeenCalledTimes(1);
     expect(syncVersionsSpy).toHaveBeenCalledWith(expect.any(Object), expect.any(String), expect.any(Object));
     expect(syncTagsSpy).toHaveBeenCalledTimes(1);
-    expect(syncTagsSpy).toHaveBeenCalledWith(expect.any(Object), path, bucketId, expect.any(String), expect.any(Object));
+    expect(syncTagsSpy).toHaveBeenCalledWith(
+      expect.any(Object), path, bucketId, expect.any(String), expect.any(Object)
+    );
     expect(syncMetadataSpy).toHaveBeenCalledTimes(1);
-    expect(syncMetadataSpy).toHaveBeenCalledWith(expect.any(Object), path, bucketId, expect.any(String), expect.any(Object));
+    expect(syncMetadataSpy).toHaveBeenCalledWith(
+      expect.any(Object), path, bucketId, expect.any(String), expect.any(Object)
+    );
   });
 
   it('Calls everything when full mode', async () => {
@@ -295,9 +364,13 @@ describe('syncJob', () => {
     expect(syncVersionsSpy).toHaveBeenCalledTimes(1);
     expect(syncVersionsSpy).toHaveBeenCalledWith(expect.any(Object), expect.any(String), expect.any(Object));
     expect(syncTagsSpy).toHaveBeenCalledTimes(1);
-    expect(syncTagsSpy).toHaveBeenCalledWith(expect.any(Object), path, bucketId, expect.any(String), expect.any(Object));
+    expect(syncTagsSpy).toHaveBeenCalledWith(
+      expect.any(Object), path, bucketId, expect.any(String), expect.any(Object)
+    );
     expect(syncMetadataSpy).toHaveBeenCalledTimes(1);
-    expect(syncMetadataSpy).toHaveBeenCalledWith(expect.any(Object), path, bucketId, expect.any(String), expect.any(Object));
+    expect(syncMetadataSpy).toHaveBeenCalledWith(
+      expect.any(Object), path, bucketId, expect.any(String), expect.any(Object)
+    );
   });
 });
 
@@ -305,32 +378,40 @@ describe('syncObject', () => {
   const _deriveObjectIdSpy = jest.spyOn(service, '_deriveObjectId');
   const createSpy = jest.spyOn(objectService, 'create');
   const deleteSpy = jest.spyOn(objectService, 'delete');
+  const getObjectPublicSpy = jest.spyOn(storageService, 'getObjectPublic');
   const pruneOrphanedMetadataSpy = jest.spyOn(metadataService, 'pruneOrphanedMetadata');
   const pruneOrphanedTagsSpy = jest.spyOn(tagService, 'pruneOrphanedTags');
   const searchObjectsSpy = jest.spyOn(objectService, 'searchObjects');
+  const updateSpy = jest.spyOn(objectService, 'update');
 
   beforeEach(() => {
     _deriveObjectIdSpy.mockReset();
     createSpy.mockReset();
     deleteSpy.mockReset();
+    getObjectPublicSpy.mockReset();
     pruneOrphanedMetadataSpy.mockReset();
     pruneOrphanedTagsSpy.mockReset();
     searchObjectsSpy.mockReset();
+    updateSpy.mockReset();
   });
 
   afterAll(() => {
     _deriveObjectIdSpy.mockRestore();
     createSpy.mockRestore();
     deleteSpy.mockRestore();
+    getObjectPublicSpy.mockRestore();
     pruneOrphanedMetadataSpy.mockRestore();
     pruneOrphanedTagsSpy.mockRestore();
     searchObjectsSpy.mockRestore();
+    updateSpy.mockRestore();
   });
 
   it('should return object when already synced', async () => {
-    const comsObject = { id: validUuidv4 };
+    const comsObject = { id: validUuidv4, path: path, public: true };
     headObjectSpy.mockResolvedValue({});
-    searchObjectsSpy.mockResolvedValue([comsObject]);
+    searchObjectsSpy.mockResolvedValue({ total: 1, data: [comsObject] });
+    getObjectPublicSpy.mockResolvedValue(true);
+    updateSpy.mockResolvedValue(comsObject);
 
     const result = await service.syncObject(path, bucketId);
 
@@ -342,6 +423,10 @@ describe('syncObject', () => {
     expect(_deriveObjectIdSpy).toHaveBeenCalledTimes(0);
     expect(createSpy).toHaveBeenCalledTimes(0);
     expect(deleteSpy).toHaveBeenCalledTimes(0);
+    expect(getObjectPublicSpy).toHaveBeenCalledTimes(1);
+    expect(getObjectPublicSpy).toHaveBeenCalledWith(expect.objectContaining({
+      filePath: path, bucketId: bucketId
+    }));
     expect(headObjectSpy).toHaveBeenCalledTimes(1);
     expect(headObjectSpy).toHaveBeenCalledWith(expect.objectContaining({
       filePath: path, bucketId: bucketId
@@ -353,6 +438,83 @@ describe('syncObject', () => {
       path: path, bucketId: bucketId
     }), expect.any(Object));
     expect(objectModelTrx.commit).toHaveBeenCalledTimes(1);
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    expect(updateSpy).toHaveBeenCalledWith(expect.objectContaining({
+      id: comsObject.id, lastSyncedDate: expect.anything()
+    }), expect.any(Object));
+  });
+
+  it('should return object when already synced but public mismatch', async () => {
+    const comsObject = { id: validUuidv4, path: path, public: true };
+    headObjectSpy.mockResolvedValue({});
+    searchObjectsSpy.mockResolvedValue({ total: 1, data: [comsObject] });
+    getObjectPublicSpy.mockResolvedValue(false);
+    updateSpy.mockResolvedValue(comsObject);
+
+    const result = await service.syncObject(path, bucketId);
+
+    expect(result).toBeTruthy();
+    expect(result.modified).toBeTruthy();
+    expect(result.object).toEqual(comsObject);
+
+    expect(ObjectModel.startTransaction).toHaveBeenCalledTimes(1);
+    expect(_deriveObjectIdSpy).toHaveBeenCalledTimes(0);
+    expect(createSpy).toHaveBeenCalledTimes(0);
+    expect(deleteSpy).toHaveBeenCalledTimes(0);
+    expect(getObjectPublicSpy).toHaveBeenCalledTimes(1);
+    expect(getObjectPublicSpy).toHaveBeenCalledWith(expect.objectContaining({
+      filePath: path, bucketId: bucketId
+    }));
+    expect(headObjectSpy).toHaveBeenCalledTimes(1);
+    expect(headObjectSpy).toHaveBeenCalledWith(expect.objectContaining({
+      filePath: path, bucketId: bucketId
+    }));
+    expect(pruneOrphanedMetadataSpy).toHaveBeenCalledTimes(0);
+    expect(pruneOrphanedTagsSpy).toHaveBeenCalledTimes(0);
+    expect(searchObjectsSpy).toHaveBeenCalledTimes(1);
+    expect(searchObjectsSpy).toHaveBeenCalledWith(expect.objectContaining({
+      path: path, bucketId: bucketId
+    }), expect.any(Object));
+    expect(objectModelTrx.commit).toHaveBeenCalledTimes(1);
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    expect(updateSpy).toHaveBeenCalledWith(expect.objectContaining({
+      id: validUuidv4, path: path, public: false, lastSyncedDate: expect.anything(), userId: SYSTEM_USER
+    }), expect.any(Object));
+  });
+
+  it('should return object when already synced but S3 ACL errors out', async () => {
+    const comsObject = { id: validUuidv4, path: path, public: true };
+    headObjectSpy.mockResolvedValue({});
+    searchObjectsSpy.mockResolvedValue({ total: 1, data: [comsObject] });
+    getObjectPublicSpy.mockImplementation(() => { throw new Error(); });
+    updateSpy.mockResolvedValue(comsObject);
+
+    const result = await service.syncObject(path, bucketId);
+
+    expect(result).toBeTruthy();
+    expect(result.modified).toBeTruthy();
+    expect(result.object).toEqual(comsObject);
+
+    expect(ObjectModel.startTransaction).toHaveBeenCalledTimes(1);
+    expect(_deriveObjectIdSpy).toHaveBeenCalledTimes(0);
+    expect(createSpy).toHaveBeenCalledTimes(0);
+    expect(deleteSpy).toHaveBeenCalledTimes(0);
+    expect(getObjectPublicSpy).toHaveBeenCalledTimes(1);
+    expect(getObjectPublicSpy).toHaveBeenCalledWith(expect.objectContaining({
+      filePath: path, bucketId: bucketId
+    }));
+    expect(headObjectSpy).toHaveBeenCalledTimes(1);
+    expect(headObjectSpy).toHaveBeenCalledWith(expect.objectContaining({
+      filePath: path, bucketId: bucketId
+    }));
+    expect(pruneOrphanedMetadataSpy).toHaveBeenCalledTimes(0);
+    expect(pruneOrphanedTagsSpy).toHaveBeenCalledTimes(0);
+    expect(searchObjectsSpy).toHaveBeenCalledTimes(1);
+    expect(searchObjectsSpy).toHaveBeenCalledWith(expect.objectContaining({
+      path: path, bucketId: bucketId
+    }), expect.any(Object));
+    expect(objectModelTrx.commit).toHaveBeenCalledTimes(1);
+    expect(updateSpy).toHaveBeenCalledTimes(1);
   });
 
   it('should insert new object when not in COMS', async () => {
@@ -360,7 +522,8 @@ describe('syncObject', () => {
     _deriveObjectIdSpy.mockResolvedValue(validUuidv4);
     createSpy.mockResolvedValue(comsObject);
     headObjectSpy.mockResolvedValue({});
-    searchObjectsSpy.mockResolvedValue(undefined);
+    searchObjectsSpy.mockResolvedValue({ total: 0, data: [] });
+    getObjectPublicSpy.mockResolvedValue(true);
 
     const result = await service.syncObject(path, bucketId);
 
@@ -376,10 +539,59 @@ describe('syncObject', () => {
       id: validUuidv4,
       name: path.match(/(?!.*\/)(.*)$/)[0],
       path: path,
+      public: true,
       bucketId: bucketId,
       userId: expect.any(String)
     }), expect.any(Object));
     expect(deleteSpy).toHaveBeenCalledTimes(0);
+    expect(getObjectPublicSpy).toHaveBeenCalledTimes(1);
+    expect(getObjectPublicSpy).toHaveBeenCalledWith(expect.objectContaining({
+      filePath: path, bucketId: bucketId
+    }));
+    expect(headObjectSpy).toHaveBeenCalledTimes(1);
+    expect(headObjectSpy).toHaveBeenCalledWith(expect.objectContaining({
+      filePath: path, bucketId: bucketId
+    }));
+    expect(pruneOrphanedMetadataSpy).toHaveBeenCalledTimes(0);
+    expect(pruneOrphanedTagsSpy).toHaveBeenCalledTimes(0);
+    expect(searchObjectsSpy).toHaveBeenCalledTimes(1);
+    expect(searchObjectsSpy).toHaveBeenCalledWith(expect.objectContaining({
+      path: path, bucketId: bucketId
+    }), expect.any(Object));
+    expect(objectModelTrx.commit).toHaveBeenCalledTimes(1);
+  });
+
+  it('should insert new object when not in COMS when S3 ACL errors out', async () => {
+    const comsObject = {};
+    _deriveObjectIdSpy.mockResolvedValue(validUuidv4);
+    createSpy.mockResolvedValue(comsObject);
+    headObjectSpy.mockResolvedValue({});
+    searchObjectsSpy.mockResolvedValue({ total: 0, data: [] });
+    getObjectPublicSpy.mockImplementation(() => { throw new Error(); });
+
+    const result = await service.syncObject(path, bucketId);
+
+    expect(result).toBeTruthy();
+    expect(result.modified).toBeTruthy();
+    expect(result.object).toEqual(comsObject);
+
+    expect(ObjectModel.startTransaction).toHaveBeenCalledTimes(1);
+    expect(_deriveObjectIdSpy).toHaveBeenCalledTimes(1);
+    expect(_deriveObjectIdSpy).toHaveBeenCalledWith(expect.any(Object), path, bucketId);
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    expect(createSpy).toHaveBeenCalledWith(expect.objectContaining({
+      id: validUuidv4,
+      name: path.match(/(?!.*\/)(.*)$/)[0],
+      path: path,
+      public: undefined,
+      bucketId: bucketId,
+      userId: expect.any(String)
+    }), expect.any(Object));
+    expect(deleteSpy).toHaveBeenCalledTimes(0);
+    expect(getObjectPublicSpy).toHaveBeenCalledTimes(1);
+    expect(getObjectPublicSpy).toHaveBeenCalledWith(expect.objectContaining({
+      filePath: path, bucketId: bucketId
+    }));
     expect(headObjectSpy).toHaveBeenCalledTimes(1);
     expect(headObjectSpy).toHaveBeenCalledWith(expect.objectContaining({
       filePath: path, bucketId: bucketId
@@ -399,7 +611,7 @@ describe('syncObject', () => {
     headObjectSpy.mockRejectedValue({});
     pruneOrphanedMetadataSpy.mockResolvedValue(0);
     pruneOrphanedTagsSpy.mockResolvedValue(0);
-    searchObjectsSpy.mockResolvedValue([comsObject]);
+    searchObjectsSpy.mockResolvedValue({ total: 1, data: [comsObject] });
 
     const result = await service.syncObject(path, bucketId);
 
@@ -412,6 +624,7 @@ describe('syncObject', () => {
     expect(createSpy).toHaveBeenCalledTimes(0);
     expect(deleteSpy).toHaveBeenCalledTimes(1);
     expect(deleteSpy).toHaveBeenCalledWith(validUuidv4, expect.any(Object));
+    expect(getObjectPublicSpy).toHaveBeenCalledTimes(0);
     expect(headObjectSpy).toHaveBeenCalledTimes(1);
     expect(headObjectSpy).toHaveBeenCalledWith(expect.objectContaining({
       filePath: path, bucketId: bucketId
@@ -430,7 +643,6 @@ describe('syncObject', () => {
 
 describe('syncVersions', () => {
   const createSpy = jest.spyOn(versionService, 'create');
-  const deleteSpy = jest.spyOn(versionService, 'delete');
   const listSpy = jest.spyOn(versionService, 'list');
   const listAllObjectVersionsSpy = jest.spyOn(storageService, 'listAllObjectVersions');
   const readSpy = jest.spyOn(objectService, 'read');
@@ -445,7 +657,6 @@ describe('syncVersions', () => {
 
   beforeEach(() => {
     createSpy.mockReset();
-    deleteSpy.mockReset();
     headObjectSpy.mockReset();
     listSpy.mockReset();
     listAllObjectVersionsSpy.mockReset();
@@ -456,7 +667,6 @@ describe('syncVersions', () => {
 
   afterAll(() => {
     createSpy.mockRestore();
-    deleteSpy.mockRestore();
     listSpy.mockRestore();
     listAllObjectVersionsSpy.mockRestore();
     readSpy.mockRestore();
@@ -484,7 +694,7 @@ describe('syncVersions', () => {
 
       expect(Version.startTransaction).toHaveBeenCalledTimes(1);
       expect(createSpy).toHaveBeenCalledTimes(2);
-      expect(deleteSpy).toHaveBeenCalledTimes(0);
+      expect(Version.delete).toHaveBeenCalledTimes(0);
       expect(headObjectSpy).toHaveBeenCalledTimes(1);
       expect(headObjectSpy).toHaveBeenCalledWith(expect.objectContaining({
         filePath: comsObject.path,
@@ -522,7 +732,7 @@ describe('syncVersions', () => {
 
       expect(Version.startTransaction).toHaveBeenCalledTimes(1);
       expect(createSpy).toHaveBeenCalledTimes(2);
-      expect(deleteSpy).toHaveBeenCalledTimes(0);
+      expect(Version.delete).toHaveBeenCalledTimes(0);
       expect(headObjectSpy).toHaveBeenCalledTimes(1);
       expect(headObjectSpy).toHaveBeenCalledWith(expect.objectContaining({
         filePath: comsObject.path,
@@ -564,7 +774,7 @@ describe('syncVersions', () => {
 
       expect(Version.startTransaction).toHaveBeenCalledTimes(1);
       expect(createSpy).toHaveBeenCalledTimes(1);
-      expect(deleteSpy).toHaveBeenCalledTimes(0);
+      expect(Version.delete).toHaveBeenCalledTimes(0);
       expect(headObjectSpy).toHaveBeenCalledTimes(1);
       expect(headObjectSpy).toHaveBeenCalledWith(expect.objectContaining({
         filePath: comsObject.path,
@@ -585,7 +795,7 @@ describe('syncVersions', () => {
 
     it('should update existing version if mimeType has changed', async () => {
       headObjectSpy.mockResolvedValue({ ContentType: 'application/octet-stream' });
-      listSpy.mockResolvedValue([{ etag: 'etag', mimeType: 'text/plain' }]);
+      listSpy.mockResolvedValue([{ etag: 'etag', mimeType: 'text/plain', s3VersionId: null }]);
       listAllObjectVersionsSpy.mockResolvedValue({
         DeleteMarkers: [],
         Versions: [{ ETag: 'etag', IsLatest: true, VersionId: 'null' }]
@@ -604,7 +814,7 @@ describe('syncVersions', () => {
 
       expect(Version.startTransaction).toHaveBeenCalledTimes(1);
       expect(createSpy).toHaveBeenCalledTimes(0);
-      expect(deleteSpy).toHaveBeenCalledTimes(0);
+      expect(Version.delete).toHaveBeenCalledTimes(0);
       expect(headObjectSpy).toHaveBeenCalledTimes(1);
       expect(headObjectSpy).toHaveBeenCalledWith(expect.objectContaining({
         filePath: comsObject.path,
@@ -625,7 +835,7 @@ describe('syncVersions', () => {
 
     it('should update existing version if etag has changed', async () => {
       headObjectSpy.mockResolvedValue({ ContentType: 'application/octet-stream' });
-      listSpy.mockResolvedValue([{ etag: 'old', mimeType: 'application/octet-stream' }]);
+      listSpy.mockResolvedValue([{ etag: 'old', mimeType: 'application/octet-stream', s3VersionId: null }]);
       listAllObjectVersionsSpy.mockResolvedValue({
         DeleteMarkers: [],
         Versions: [{ ETag: 'new', IsLatest: true, VersionId: 'null' }]
@@ -644,7 +854,7 @@ describe('syncVersions', () => {
 
       expect(Version.startTransaction).toHaveBeenCalledTimes(1);
       expect(createSpy).toHaveBeenCalledTimes(0);
-      expect(deleteSpy).toHaveBeenCalledTimes(0);
+      expect(Version.delete).toHaveBeenCalledTimes(0);
       expect(headObjectSpy).toHaveBeenCalledTimes(1);
       expect(headObjectSpy).toHaveBeenCalledWith(expect.objectContaining({
         filePath: comsObject.path,
@@ -665,7 +875,7 @@ describe('syncVersions', () => {
 
     it('should update nothing when version record not modified', async () => {
       headObjectSpy.mockResolvedValue({ ContentType: 'application/octet-stream' });
-      listSpy.mockResolvedValue([{ etag: 'etag', mimeType: 'application/octet-stream' }]);
+      listSpy.mockResolvedValue([{ etag: 'etag', mimeType: 'application/octet-stream', s3VersionId: null }]);
       listAllObjectVersionsSpy.mockResolvedValue({
         DeleteMarkers: [],
         Versions: [{ ETag: 'etag', IsLatest: true, VersionId: 'null' }]
@@ -683,7 +893,7 @@ describe('syncVersions', () => {
 
       expect(Version.startTransaction).toHaveBeenCalledTimes(1);
       expect(createSpy).toHaveBeenCalledTimes(0);
-      expect(deleteSpy).toHaveBeenCalledTimes(0);
+      expect(Version.delete).toHaveBeenCalledTimes(0);
       expect(headObjectSpy).toHaveBeenCalledTimes(1);
       expect(headObjectSpy).toHaveBeenCalledWith(expect.objectContaining({
         filePath: comsObject.path,
@@ -707,7 +917,12 @@ describe('syncVersions', () => {
     it('should drop COMS versions that are not in S3', async () => {
       createSpy.mockResolvedValue({});
       headObjectSpy.mockResolvedValue({});
-      listSpy.mockResolvedValue([{ s3VersionId: validUuidv4 }]);
+      // extra versions in coms to delete
+      listSpy.mockResolvedValue([
+        { s3VersionId: validUuidv4 },
+        { s3VersionId: validUuidv4 },
+        { s3VersionId: validUuidv4 }
+      ]);
       listAllObjectVersionsSpy.mockResolvedValue({ DeleteMarkers: [{}], Versions: [{}] });
 
       const result = await service.syncVersions(comsObject);
@@ -722,8 +937,18 @@ describe('syncVersions', () => {
 
       expect(Version.startTransaction).toHaveBeenCalledTimes(1);
       expect(createSpy).toHaveBeenCalledTimes(2);
-      expect(deleteSpy).toHaveBeenCalledTimes(1);
-      expect(deleteSpy).toHaveBeenCalledWith(comsObject.id, validUuidv4, expect.any(String), expect.any(Object));
+      expect(Version.delete).toHaveBeenCalledTimes(1);
+      expect(Version.where).toHaveBeenCalledTimes(1);
+      expect(Version.where).toHaveBeenCalledWith('objectId', comsObject.id);
+      expect(Version.whereNotNull).toHaveBeenCalledTimes(1);
+      expect(Version.whereNotNull).toHaveBeenCalledWith('s3VersionId');
+      expect(Version.whereIn).toHaveBeenCalledTimes(1);
+      expect(Version.whereIn).toHaveBeenCalledWith('id', [
+        { s3VersionId: validUuidv4 },
+        { s3VersionId: validUuidv4 },
+        { s3VersionId: validUuidv4 }
+      ].map(cv => cv.id));
+
       expect(headObjectSpy).toHaveBeenCalledTimes(1);
       expect(headObjectSpy).toHaveBeenCalledWith(expect.objectContaining({
         filePath: comsObject.path,
@@ -739,6 +964,47 @@ describe('syncVersions', () => {
       expect(readSpy).toHaveBeenCalledTimes(0);
       expect(updateSpy).toHaveBeenCalledTimes(0);
       expect(updateIsLatestSpy).toHaveBeenCalledTimes(0);
+      expect(versionTrx.commit).toHaveBeenCalledTimes(1);
+    });
+
+    it('should update existing values when S3 reports different values', async () => {
+      createSpy.mockResolvedValue({});
+      headObjectSpy.mockResolvedValue({});
+      listSpy.mockResolvedValue([{ id: validUuidv4, s3VersionId: validUuidv4 }]);
+      listAllObjectVersionsSpy.mockResolvedValue({
+        DeleteMarkers: [{}],
+        Versions: [{ ETag: 'different', IsLatest: true, VersionId: validUuidv4 }]
+      });
+      updateIsLatestSpy.mockResolvedValue([{}]);
+
+      const result = await service.syncVersions(comsObject);
+
+      expect(result).toBeTruthy();
+      expect(Array.isArray(result)).toBeTruthy();
+      expect(result).toHaveLength(2);
+      expect(result).toEqual(expect.arrayContaining([expect.objectContaining({
+        modified: true,
+        version: expect.any(Object)
+      })]));
+
+      expect(Version.startTransaction).toHaveBeenCalledTimes(1);
+      expect(createSpy).toHaveBeenCalledTimes(1);
+      expect(Version.delete).toHaveBeenCalledTimes(0);
+      expect(headObjectSpy).toHaveBeenCalledTimes(0);
+      expect(listSpy).toHaveBeenCalledTimes(1);
+      expect(listSpy).toHaveBeenCalledWith(validUuidv4, expect.any(Object));
+      expect(listAllObjectVersionsSpy).toHaveBeenCalledTimes(1);
+      expect(listAllObjectVersionsSpy).toHaveBeenCalledWith(expect.objectContaining({
+        filePath: comsObject.path,
+        bucketId: comsObject.bucketId
+      }));
+      expect(readSpy).toHaveBeenCalledTimes(0);
+      expect(updateSpy).toHaveBeenCalledTimes(1);
+      expect(updateSpy).toHaveBeenCalledWith(expect.objectContaining({
+        etag: 'different'
+      }), expect.any(String), expect.anything());
+      expect(updateIsLatestSpy).toHaveBeenCalledTimes(1);
+      expect(updateIsLatestSpy).toHaveBeenCalledWith(validUuidv4, expect.any(Object));
       expect(versionTrx.commit).toHaveBeenCalledTimes(1);
     });
 
@@ -764,7 +1030,7 @@ describe('syncVersions', () => {
 
       expect(Version.startTransaction).toHaveBeenCalledTimes(1);
       expect(createSpy).toHaveBeenCalledTimes(1);
-      expect(deleteSpy).toHaveBeenCalledTimes(0);
+      expect(Version.delete).toHaveBeenCalledTimes(0);
       expect(headObjectSpy).toHaveBeenCalledTimes(0);
       expect(listSpy).toHaveBeenCalledTimes(1);
       expect(listSpy).toHaveBeenCalledWith(validUuidv4, expect.any(Object));
@@ -800,7 +1066,7 @@ describe('syncVersions', () => {
 
       expect(Version.startTransaction).toHaveBeenCalledTimes(1);
       expect(createSpy).toHaveBeenCalledTimes(1);
-      expect(deleteSpy).toHaveBeenCalledTimes(0);
+      expect(Version.delete).toHaveBeenCalledTimes(0);
       expect(headObjectSpy).toHaveBeenCalledTimes(0);
       expect(listSpy).toHaveBeenCalledTimes(1);
       expect(listSpy).toHaveBeenCalledWith(validUuidv4, expect.any(Object));
@@ -825,7 +1091,8 @@ describe('syncTags', () => {
   const comsVersion = {
     id: validUuidv4,
     objectId: validUuidv4,
-    s3VersionId: validUuidv4
+    s3VersionId: validUuidv4,
+    isLatest: true
   };
 
   beforeEach(() => {
@@ -877,7 +1144,9 @@ describe('syncTags', () => {
 
     expect(Version.startTransaction).toHaveBeenCalledTimes(1);
     expect(associateTagsSpy).toHaveBeenCalledTimes(1);
-    expect(associateTagsSpy).toHaveBeenCalledWith(comsVersion.id, expect.any(Array), expect.any(String), expect.any(Object));
+    expect(associateTagsSpy).toHaveBeenCalledWith(
+      comsVersion.id, expect.any(Array), expect.any(String), expect.any(Object)
+    );
     expect(dissociateTagsSpy).toHaveBeenCalledTimes(0);
     expect(fetchTagsForVersionSpy).toHaveBeenCalledTimes(1);
     expect(fetchTagsForVersionSpy).toHaveBeenCalledWith(expect.objectContaining({
@@ -898,7 +1167,6 @@ describe('syncTags', () => {
         Key: 'coms-id',
         Value: comsVersion.objectId
       }]),
-      s3VersionId: comsVersion.s3VersionId,
       bucketId: bucketId,
     }));
     expect(versionTrx.commit).toHaveBeenCalledTimes(1);
@@ -920,7 +1188,9 @@ describe('syncTags', () => {
 
     expect(Version.startTransaction).toHaveBeenCalledTimes(1);
     expect(associateTagsSpy).toHaveBeenCalledTimes(1);
-    expect(associateTagsSpy).toHaveBeenCalledWith(comsVersion.id, expect.any(Array), expect.any(String), expect.any(Object));
+    expect(associateTagsSpy).toHaveBeenCalledWith(
+      comsVersion.id, expect.any(Array), expect.any(String), expect.any(Object)
+    );
     expect(dissociateTagsSpy).toHaveBeenCalledTimes(0);
     expect(fetchTagsForVersionSpy).toHaveBeenCalledTimes(1);
     expect(fetchTagsForVersionSpy).toHaveBeenCalledWith(expect.objectContaining({
@@ -940,7 +1210,112 @@ describe('syncTags', () => {
         Key: 'coms-id',
         Value: comsVersion.objectId
       }]),
+      bucketId: bucketId,
+    }));
+    expect(versionTrx.commit).toHaveBeenCalledTimes(1);
+  });
+
+  it('should not write coms-id tag when coms version is not latest', async () => {
+    fetchTagsForVersionSpy.mockResolvedValue([{}]);
+    getObjectTaggingSpy.mockResolvedValue({});
+    putObjectTaggingSpy.mockResolvedValue({});
+
+    comsVersion.isLatest = false;
+    const result = await service.syncTags(comsVersion, path, bucketId);
+    // reset for other tests
+    comsVersion.isLatest = true;
+
+    expect(result).toBeTruthy();
+    expect(Array.isArray(result)).toBeTruthy();
+    expect(result).toHaveLength(0);
+
+    expect(Version.startTransaction).toHaveBeenCalledTimes(1);
+    expect(associateTagsSpy).toHaveBeenCalledTimes(0);
+    expect(dissociateTagsSpy).toHaveBeenCalledTimes(0);
+    expect(fetchTagsForVersionSpy).toHaveBeenCalledTimes(1);
+    expect(fetchTagsForVersionSpy).toHaveBeenCalledWith(expect.objectContaining({
+      versionIds: comsVersion.id
+    }), expect.any(Object));
+    expect(getObjectTaggingSpy).toHaveBeenCalledTimes(1);
+    expect(getObjectTaggingSpy).toHaveBeenCalledWith(expect.objectContaining({
+      filePath: path,
       s3VersionId: comsVersion.s3VersionId,
+      bucketId: bucketId
+    }));
+    expect(getSpy).toHaveBeenCalledTimes(0);
+    expect(putObjectTaggingSpy).toHaveBeenCalledTimes(0);
+    expect(versionTrx.commit).toHaveBeenCalledTimes(1);
+  });
+
+  it('should write coms-id tag when coms version is latest', async () => {
+    fetchTagsForVersionSpy.mockResolvedValue([{}]);
+    getObjectTaggingSpy.mockResolvedValue({});
+    putObjectTaggingSpy.mockResolvedValue({});
+
+    const result = await service.syncTags(comsVersion, path, bucketId);
+
+    expect(result).toBeTruthy();
+    expect(Array.isArray(result)).toBeTruthy();
+    expect(result).toHaveLength(1);
+
+    expect(Version.startTransaction).toHaveBeenCalledTimes(1);
+    expect(associateTagsSpy).toHaveBeenCalledTimes(1);
+    expect(dissociateTagsSpy).toHaveBeenCalledTimes(0);
+    expect(fetchTagsForVersionSpy).toHaveBeenCalledTimes(1);
+    expect(fetchTagsForVersionSpy).toHaveBeenCalledWith(expect.objectContaining({
+      versionIds: comsVersion.id
+    }), expect.any(Object));
+    expect(getObjectTaggingSpy).toHaveBeenCalledTimes(1);
+    expect(getObjectTaggingSpy).toHaveBeenCalledWith(expect.objectContaining({
+      filePath: path,
+      s3VersionId: comsVersion.s3VersionId,
+      bucketId: bucketId
+    }));
+    expect(getSpy).toHaveBeenCalledTimes(0);
+    expect(putObjectTaggingSpy).toHaveBeenCalledTimes(1);
+    expect(putObjectTaggingSpy).toHaveBeenCalledWith(expect.objectContaining({
+      filePath: path,
+      tags: expect.arrayContaining([{
+        Key: 'coms-id',
+        Value: comsVersion.objectId
+      }]),
+      bucketId: bucketId,
+    }));
+    expect(versionTrx.commit).toHaveBeenCalledTimes(1);
+  });
+
+  it('should not write coms-id tag when coms version is latest and continues when unable to write to S3', async () => {
+    fetchTagsForVersionSpy.mockResolvedValue([{}]);
+    getObjectTaggingSpy.mockResolvedValue({});
+    putObjectTaggingSpy.mockRejectedValue({ message: 'nope' });
+
+    const result = await service.syncTags(comsVersion, path, bucketId);
+
+    expect(result).toBeTruthy();
+    expect(Array.isArray(result)).toBeTruthy();
+    expect(result).toHaveLength(0);
+
+    expect(Version.startTransaction).toHaveBeenCalledTimes(1);
+    expect(associateTagsSpy).toHaveBeenCalledTimes(0);
+    expect(dissociateTagsSpy).toHaveBeenCalledTimes(0);
+    expect(fetchTagsForVersionSpy).toHaveBeenCalledTimes(1);
+    expect(fetchTagsForVersionSpy).toHaveBeenCalledWith(expect.objectContaining({
+      versionIds: comsVersion.id
+    }), expect.any(Object));
+    expect(getObjectTaggingSpy).toHaveBeenCalledTimes(1);
+    expect(getObjectTaggingSpy).toHaveBeenCalledWith(expect.objectContaining({
+      filePath: path,
+      s3VersionId: comsVersion.s3VersionId,
+      bucketId: bucketId
+    }));
+    expect(getSpy).toHaveBeenCalledTimes(0);
+    expect(putObjectTaggingSpy).toHaveBeenCalledTimes(1);
+    expect(putObjectTaggingSpy).toHaveBeenCalledWith(expect.objectContaining({
+      filePath: path,
+      tags: expect.arrayContaining([{
+        Key: 'coms-id',
+        Value: comsVersion.objectId
+      }]),
       bucketId: bucketId,
     }));
     expect(versionTrx.commit).toHaveBeenCalledTimes(1);
@@ -961,7 +1336,9 @@ describe('syncTags', () => {
 
     expect(Version.startTransaction).toHaveBeenCalledTimes(1);
     expect(associateTagsSpy).toHaveBeenCalledTimes(1);
-    expect(associateTagsSpy).toHaveBeenCalledWith(comsVersion.id, expect.any(Array), expect.any(String), expect.any(Object));
+    expect(associateTagsSpy).toHaveBeenCalledWith(
+      comsVersion.id, expect.any(Array), expect.any(String), expect.any(Object)
+    );
     expect(dissociateTagsSpy).toHaveBeenCalledTimes(0);
     expect(fetchTagsForVersionSpy).toHaveBeenCalledTimes(1);
     expect(fetchTagsForVersionSpy).toHaveBeenCalledWith(expect.objectContaining({
@@ -999,7 +1376,9 @@ describe('syncTags', () => {
 
     expect(Version.startTransaction).toHaveBeenCalledTimes(1);
     expect(associateTagsSpy).toHaveBeenCalledTimes(1);
-    expect(associateTagsSpy).toHaveBeenCalledWith(comsVersion.id, expect.any(Array), expect.any(String), expect.any(Object));
+    expect(associateTagsSpy).toHaveBeenCalledWith(
+      comsVersion.id, expect.any(Array), expect.any(String), expect.any(Object)
+    );
     expect(dissociateTagsSpy).toHaveBeenCalledTimes(0);
     expect(fetchTagsForVersionSpy).toHaveBeenCalledTimes(1);
     expect(fetchTagsForVersionSpy).toHaveBeenCalledWith(expect.objectContaining({

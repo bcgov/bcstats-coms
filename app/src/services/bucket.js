@@ -3,21 +3,54 @@ const { v4: uuidv4, NIL: SYSTEM_USER } = require('uuid');
 const config = require('config');
 
 const bucketPermissionService = require('./bucketPermission');
-const { Permissions } = require('../components/constants');
 const { Bucket } = require('../db/models');
+const { Permissions } = require('../components/constants');
 
 /**
  * The Bucket DB Service
  */
 const service = {
+
+  /**
+   * @function checkBucketBasicAccess
+   * Grants a user provided permissions to the bucket if the data precisely matches
+   * accessKeyId, bucketId, bucket and endpoint values.
+   * @param {string} data.bucketId The COMS guid for the bucket
+   * @param {string} data.bucket The S3 bucket name
+   * @param {string} data.endpoint The S3 bucket endpoint
+   * @param {string} data.accessKeyId The S3 bucket secret access key
+   * @param {object} [etrx=undefined] An optional Objection Transaction object
+   * @returns {Promise<object>} The result will include all bucketIds that pass the validation
+   * @throws The error encountered upon db transaction failure
+   */
+  checkBucketBasicAccess: async (data, etrx = undefined) => {
+    let trx;
+    try {
+      trx = etrx ? etrx : await Bucket.startTransaction();
+
+      // Get existing record from DB
+      const buckets = await Bucket.query()
+        .modify('filterBucketIds', data.bucketId)
+        .where('bucket', data.bucket)
+        .where('endpoint', data.endpoint)
+        .where('accessKeyId', data.accessKeyId);
+
+      if (!etrx) await trx.commit();
+      return buckets.map(buckets => buckets.bucketId);
+    } catch (err) {
+      if (!etrx && trx) await trx.rollback();
+      throw err;
+    }
+  },
   /**
    * @function checkGrantPermissions
-   * Grants a user full permissions to the bucket if the data precisely matches
+   * Grants a user provided permissions to the bucket if the data precisely matches
    * accessKeyId and secretAccessKey values.
    * @param {string} data.accessKeyId The S3 bucket access key id
    * @param {string} data.bucket The S3 bucket identifier
    * @param {string} data.endpoint The S3 bucket endpoint
    * @param {string} data.key The relative S3 key/subpath managed by this bucket
+   * @param {string} data.permCodes Permissions to give to current user for the bucket
    * @param {string} data.secretAccessKey The S3 bucket secret access key
    * @param {object} [etrx=undefined] An optional Objection Transaction object
    * @returns {Promise<object>} The result of running the insert operation
@@ -39,16 +72,17 @@ const service = {
         bucket.accessKeyId === data.accessKeyId &&
         bucket.secretAccessKey === data.secretAccessKey
       ) {
-        // Add all permission codes for the uploader
-        if (data.userId && data.userId !== SYSTEM_USER) {
-          const perms = Object.values(Permissions).map((p) => ({
+        // Add permissions
+        if (data.permCodes.length && data.userId && data.userId !== SYSTEM_USER) {
+          const perms = data.permCodes.map((p) => ({
             userId: data.userId,
             permCode: p
           }));
           await bucketPermissionService.addPermissions(bucket.bucketId, perms, data.userId, trx);
         }
       } else {
-        throw new Error('Bucket credential mismatch');
+        throw new Error('The bucket already exists in COMS, but with different credentials. ' +
+          'Please contact your object storage server admin, or whoever added the bucket first.');
       }
 
       if (!etrx) await trx.commit();
@@ -61,12 +95,13 @@ const service = {
 
   /**
    * @function create
-   * Create a bucket record and give the uploader (if authed) permissions
+   * Create a bucket record and give the current user the provided permissions
    * @param {string} data.bucketName The user-defined bucket name identifier
    * @param {string} data.accessKeyId The S3 bucket access key id
    * @param {string} data.bucket The S3 bucket identifier
    * @param {string} data.endpoint The S3 bucket endpoint
    * @param {string} data.key The relative S3 key/subpath managed by this bucket
+   * @param {string} data.permCodes Permissions to give to current user for the bucket
    * @param {string} data.secretAccessKey The S3 bucket secret access key
    * @param {string} [data.region] The optional S3 bucket region
    * @param {boolean} [data.active] The optional active flag - defaults to true if undefined
@@ -95,9 +130,9 @@ const service = {
 
       const response = await Bucket.query(trx).insert(obj).returning('*');
 
-      // Add all permission codes for the uploader
-      if (data.userId && data.userId !== SYSTEM_USER) {
-        const perms = Object.values(Permissions).map((p) => ({
+      // Add permissions for a current oidc user
+      if (data.permCodes.length && data.userId && data.userId !== SYSTEM_USER) {
+        const perms = data.permCodes.map((p) => ({
           userId: data.userId,
           permCode: p
         }));
@@ -142,6 +177,25 @@ const service = {
   },
 
   /**
+   * Gets all child bucket records for a given bucket, where the specified user
+   * has MANAGE permission on said child buckets.
+   * @param {string} parentBucketId bucket id of the parent bucket
+   * @param {string} userId user id
+   * @param {object} [etrx=undefined] An optional Objection Transaction object
+   * @returns {Promise<object[]>} An array of bucket records that are children of the parent,
+   *                              where the user has MANAGE permissions.
+   */
+  getChildrenWithManagePermissions: async (parentBucketId, userId, etrx = undefined) => {
+    const parentBucket = await service.read(parentBucketId);
+    const allChildren = await service.searchChildBuckets(parentBucket, true, userId, etrx);
+
+    const filteredChildren = allChildren.filter(bucket =>
+      bucket.bucketPermission?.some(perm => perm.userId === userId && perm.permCode === Permissions.MANAGE)
+    );
+    return filteredChildren;
+  },
+
+  /**
    * @function searchBuckets
    * Search and filter for specific bucket records
    * @param {string|string[]} [params.bucketId] Optional string or array of uuids representing the bucket
@@ -163,6 +217,49 @@ const service = {
         const { bucketPermission, ...bucket } = row;
         return bucket;
       }));
+  },
+
+  /**
+   * @function searchChildBuckets
+   * Get db records for each bucket that acts as a sub-folder of the provided bucket,
+   * and is accessible to a given user
+   * @param {object} parentBucket a bucket model (record) from the COMS db
+   * @param {boolean} returnPermissions also return current user's permissions for each bucket
+   * @param {string} userId uuid of the user
+   * @param {object} [etrx=undefined] An optional Objection Transaction object
+   * @returns {Promise<object[]>} An array of bucket records that the given user can access
+   * @throws If there are no records found
+   */
+  searchChildBuckets: async (parentBucket, returnPermissions = false, userId, etrx = undefined) => {
+    let trx;
+    try {
+      trx = etrx ? etrx : await Bucket.startTransaction();
+      const response = Bucket.query()
+        .modify(query => {
+          if (returnPermissions) {
+            query
+              .withGraphJoined('bucketPermission')
+              .modify(query => {
+                if (userId !== SYSTEM_USER) {
+                  query
+                    .whereIn('bucketPermission.bucketId', builder => {
+                      builder.distinct('bucketPermission.bucketId')
+                        .where('bucketPermission.userId', userId);
+                    });
+                }
+              });
+          }
+        })
+        .modify('filterKeyIsChild', parentBucket.key)
+        .modify('filterEndpoint', parentBucket.endpoint)
+        .where('bucket', parentBucket.bucket);
+
+      if (!etrx) await trx.commit();
+      return response;
+    } catch (err) {
+      if (!etrx && trx) await trx.rollback();
+      throw err;
+    }
   },
 
   /**
@@ -207,6 +304,7 @@ const service = {
    * @param {string} [data.secretAccessKey] The optional S3 bucket secret access key
    * @param {string} [data.region] The optional S3 bucket region
    * @param {boolean} [data.active] The optional active flag - defaults to true if undefined
+   * @param {string} [data.lastSyncRequestedDate] The optional ISO string formatted date when a sync was last requested
    * @param {object} [etrx=undefined] An optional Objection Transaction object
    * @returns {Promise<object>} The result of running the patch operation
    * @throws The error encountered upon db transaction failure
@@ -225,7 +323,8 @@ const service = {
         secretAccessKey: data.secretAccessKey ? data.secretAccessKey : config.get('objectStorage.secretAccessKey'),
         region: data.region,
         active: data.active,
-        updatedBy: data.userId
+        updatedBy: data.userId,
+        lastSyncRequestedDate: data.lastSyncRequestedDate
       });
 
       if (!etrx) await trx.commit();

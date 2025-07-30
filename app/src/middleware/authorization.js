@@ -1,10 +1,21 @@
 const Problem = require('api-problem');
 
 const log = require('../components/log')(module.filename);
-const { AuthMode, AuthType, Permissions } = require('../components/constants');
-const { getAppAuthMode, getCurrentIdentity } = require('../components/utils');
+const { AuthMode, AuthType, Permissions, ElevatedIdps } = require('../components/constants');
+const {
+  getAppAuthMode,
+  getCurrentIdentity,
+  getConfigBoolean,
+  hasOnlyPermittedKeys,
+  mixedQueryToArray,
+  stripDelimit
+} = require('../components/utils');
 const { NIL: SYSTEM_USER } = require('uuid');
-const { bucketPermissionService, objectService, objectPermissionService, userService } = require('../services');
+const {
+  bucketPermissionService,
+  objectService,
+  objectPermissionService,
+  userService, bucketService } = require('../services');
 
 /**
  * @function _checkPermission
@@ -43,6 +54,59 @@ const _checkPermission = async ({ currentObject, currentUser, params }, permissi
 
   log.debug('Missing user identification', { function: '_checkPermission' });
   return result;
+};
+/**
+ * @function checkS3BasicAccess
+ * Checks and authorized access to perform operation for s3 basic authentication request
+ * @param {object} req Express request object
+ * @param {object} _res Express response object
+ * @param {function} next The next callback function
+ * @returns {function} Express middleware function
+ * @throws The error encountered upon failure
+ * @returns
+ */
+const checkS3BasicAccess = async (req, _res, next) => {
+  const authType = req.currentUser ? req.currentUser.authType : undefined;
+  const bucketSettings = req.currentUser?.bucketSettings ? req.currentUser.bucketSettings : undefined;
+
+  if (getConfigBoolean('basicAuth.s3AccessMode') && authType === AuthType.BASIC && bucketSettings) {
+    // determine which buckets relate to the request
+    let bucketIds = mixedQueryToArray(req.query.bucketId)
+      || mixedQueryToArray(req.params.bucketId) || req.body.bucketId;
+    const objIds = mixedQueryToArray(req.query.objectId) || mixedQueryToArray(req.params.objectId) || req.body.objectId;
+    const versionIds = mixedQueryToArray(req.query.versionId);
+    const s3VersionIds = mixedQueryToArray(req.query.s3VersionId);
+
+    if (!bucketIds?.length) {
+      if (objIds?.length || versionIds?.length || s3VersionIds?.length) {
+        const objects = await objectService.searchObjects({
+          id: objIds, versionId: versionIds, s3VersionId: s3VersionIds
+        });
+        bucketIds = objects.data.map(i => i.bucketId);
+      }
+    }
+
+    // filter request by buckets matching provided credentials
+    try {
+      const bucketData = {
+        bucketId: bucketIds,
+        bucket: bucketSettings.bucket,
+        endpoint: stripDelimit(bucketSettings.endpoint),
+        accessKeyId: bucketSettings.accessKeyId,
+      };
+      const buckets = await bucketService.checkBucketBasicAccess(bucketData);
+
+      if (buckets.length != 0) {
+        //bucketId params will be overwritten with passed or valid access bucketId.
+        req.query.bucketId = buckets.length > 1 ? buckets : buckets[0];
+      } else {
+        return next(new Problem(403, { detail: 'Invalid authorization credentials', instance: req.originalUrl }));
+      }
+    } catch (err) {
+      return next(new Problem(403, { detail: err.message, instance: req.originalUrl }));
+    }
+  }
+  next();
 };
 
 /**
@@ -136,13 +200,79 @@ const hasPermission = (permission) => {
       }
     } catch (err) {
       log.verbose(err.message, { function: 'hasPermission' });
-      return next(new Problem(403, { detail: 'User lacks permission to complete this action', instance: req.originalUrl }));
+      return next(new Problem(403, {
+        detail: 'User lacks permission to complete this action',
+        instance: req.originalUrl
+      }));
     }
 
     next();
   };
 };
 
+/**
+ * if in strict mode, when non-idir auth, require one or more of the following query parameters:
+ * - complete email address
+ * - userId
+ * - identityId
+ *
+ * This restriction ensures that a non-idir user cannot expose other external user's names and email addresses
+ * through a user search without knowing their full email, userId or identityId
+ */
+const restrictNonIdirUserSearch = async (req, _res, next) => {
+  try {
+    if (getConfigBoolean('server.privacyMask') &&
+      req.currentUser.authType === AuthType.BEARER &&
+      !ElevatedIdps.includes(req.currentUser.tokenPayload.identity_provider) &&
+      !hasOnlyPermittedKeys(req.query, ['email', 'userId', 'identityId'])
+    ) {
+      throw new Error('User lacks permission to complete this action');
+    }
+  }
+  catch (err) {
+    log.verbose(err.message, { function: 'restrictNonIdirUserSearch' });
+    return next(new Problem(403, {
+      detail: err.message,
+      instance: req.originalUrl
+    }));
+  }
+
+  // if searching by email address,
+  // add a query parameter indicating that email parameter must have an exact match
+  if (Object.prototype.hasOwnProperty.call(req.query, 'email')) req.query.emailExact = true;
+
+  next();
+};
+
+/**
+ * If privacyMask (soon to be renamed as 'strictMode' to support additional feature restroctions)
+ * is true and request is from a non-idir user, throw a permission error
+ */
+const checkElevatedUser = async (req, _res, next) => {
+  try {
+    if (getConfigBoolean('server.privacyMask') &&
+      req.currentUser.authType === AuthType.BEARER &&
+      !ElevatedIdps.includes(req.currentUser.tokenPayload.identity_provider)) {
+      throw new Error('User lacks permission to complete this action');
+    }
+  }
+  catch (err) {
+    log.verbose(err.message, { function: 'checkElevatedUser' });
+    return next(new Problem(403, {
+      detail: err.message,
+      instance: req.originalUrl
+    }));
+  }
+  next();
+};
+
 module.exports = {
-  _checkPermission, checkAppMode, currentObject, hasPermission
+  _checkPermission,
+  checkAppMode,
+  checkS3BasicAccess,
+  currentObject,
+  hasPermission,
+  restrictNonIdirUserSearch,
+  checkElevatedUser,
+  // checkGrantingPermittedPermissions
 };

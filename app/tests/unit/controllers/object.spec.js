@@ -4,7 +4,14 @@ const { MAXCOPYOBJECTLENGTH, MetadataDirective, TaggingDirective } = require('..
 const utils = require('../../../src/db/models/utils');
 
 const controller = require('../../../src/controllers/object');
-const { storageService, objectService, metadataService, tagService, versionService, userService } = require('../../../src/services');
+const {
+  storageService,
+  objectService,
+  metadataService,
+  tagService,
+  versionService,
+  userService
+} = require('../../../src/services');
 
 const mockResponse = () => {
   const res = {};
@@ -34,6 +41,7 @@ describe('addMetadata', () => {
   const metadataAssociateMetadataSpy = jest.spyOn(metadataService, 'associateMetadata');
   const tagAssociateTagsSpy = jest.spyOn(tagService, 'associateTags');
   const trxWrapperSpy = jest.spyOn(utils, 'trxWrapper');
+  const updateSpy = jest.spyOn(objectService, 'update');
   const setHeadersSpy = jest.spyOn(controller, '_processS3Headers');
 
   const next = jest.fn();
@@ -73,6 +81,7 @@ describe('addMetadata', () => {
     storageGetObjectTaggingSpy.mockResolvedValue({ TagSet: [] });
     storageCopyObjectSpy.mockResolvedValue(GoodResponse);
     trxWrapperSpy.mockImplementation(callback => callback({}));
+    updateSpy.mockResolvedValue({});
     versionCopySpy.mockResolvedValue({ id: '5dad1ec9-d3c0-4b0f-8ead-cb4d9fa98987' });
     metadataAssociateMetadataSpy.mockResolvedValue({});
     setHeadersSpy.mockImplementation(x => x);
@@ -108,12 +117,11 @@ describe('addTags', () => {
   const storagePutObjectTaggingSpy = jest.spyOn(storageService, 'putObjectTagging');
   const getCurrentUserIdSpy = jest.spyOn(userService, 'getCurrentUserId');
 
-
   const next = jest.fn();
 
   it('should add the new tags', async () => {
     // response from S3
-    const getObjectTaggingResponse = { TagSet: []};
+    const getObjectTaggingResponse = { TagSet: [] };
 
     // request object
     const req = {
@@ -143,8 +151,7 @@ describe('addTags', () => {
     });
   });
 
-  // TODO: enable this test after a re-factor error reporting
-  it.skip('responds 409 when total tags is greater than 10', async () => {
+  it('responds 409 when total tags is greater than 10', async () => {
     // response from S3
     const getObjectTaggingResponse = {
       TagSet: [
@@ -156,15 +163,15 @@ describe('addTags', () => {
     const req = {
       params: { objectId: 'xyz-789' },
       query: {
-        tagset: { a: '1', b: '2', c: '3', d: '4', e: '5', f: '6', g: '7', h: '8', i: '9', j: '10'}
+        tagset: { a: '1', b: '2', c: '3', d: '4', e: '5', f: '6', g: '7', h: '8', i: '9', j: '10' }
       }
     };
-
+    getCurrentUserIdSpy.mockReturnValue('user-123');
     storageGetObjectTaggingSpy.mockResolvedValue(getObjectTaggingResponse);
 
     await controller.addTags(req, res, next);
 
-    // expect(next).toHaveReturned(new Problem(422, 'User-defined Tag count limit is 9'));
+    expect(next).toHaveBeenCalledWith(new Problem(409));
   });
 
   it('should concatenate the new tags', async () => {
@@ -372,7 +379,7 @@ describe('deleteObject', () => {
 
     await controller.deleteObject(req, res, next);
     expect(versionDeleteSpy).toHaveBeenCalledTimes(1);
-    expect(versionDeleteSpy).toHaveBeenCalledWith('xyz-789', '123', '456');
+    expect(versionDeleteSpy).toHaveBeenCalledWith('xyz-789', '123');
   });
 
   it('should delete object if object has no other remaining versions', async () => {
@@ -500,6 +507,11 @@ describe('replaceMetadata', () => {
   const storageGetObjectTaggingSpy = jest.spyOn(storageService, 'getObjectTagging');
   const storageHeadObjectSpy = jest.spyOn(storageService, 'headObject');
   const storageCopyObjectSpy = jest.spyOn(storageService, 'copyObject');
+  const trxWrapperSpy = jest.spyOn(utils, 'trxWrapper');
+  const updateSpy = jest.spyOn(objectService, 'update');
+  const versionCopySpy = jest.spyOn(versionService, 'copy');
+  const metadataAssociateMetadataSpy = jest.spyOn(metadataService, 'associateMetadata');
+  const tagAssociateTagsSpy = jest.spyOn(tagService, 'associateTags');
 
   const next = jest.fn();
 
@@ -532,7 +544,11 @@ describe('replaceMetadata', () => {
 
     storageHeadObjectSpy.mockReturnValue(GoodResponse);
     storageGetObjectTaggingSpy.mockResolvedValue({ TagSet: [] });
-    storageCopyObjectSpy.mockReturnValue({});
+    storageCopyObjectSpy.mockResolvedValue({ VersionId: 'versionId' });
+    trxWrapperSpy.mockImplementation(callback => callback({}));
+    updateSpy.mockResolvedValue({});
+    versionCopySpy.mockResolvedValue({ id: '5dad1ec9-d3c0-4b0f-8ead-cb4d9fa98987' });
+    metadataAssociateMetadataSpy.mockResolvedValue({});
 
     await controller.replaceMetadata(req, res, next);
 
@@ -547,6 +563,12 @@ describe('replaceMetadata', () => {
       tags: { 'coms-id': 'xyz-789' },
       s3VersionId: undefined
     });
+
+    expect(trxWrapperSpy).toHaveBeenCalledTimes(1);
+    expect(versionCopySpy).toHaveBeenCalledTimes(1);
+    expect(metadataAssociateMetadataSpy).toHaveBeenCalledTimes(1);
+    expect(tagAssociateTagsSpy).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(204);
   });
 
   it('should replace replace the name', async () => {

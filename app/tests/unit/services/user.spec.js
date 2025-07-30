@@ -45,7 +45,7 @@ const token = {
   preferred_username: 'john@email.com',
   given_name: 'john',
   family_name: 'smith',
-  name: 'john smith',
+  display_name: 'john smith',
   email: 'jsmith@email.com',
   identity_provider: 'idir'
 };
@@ -255,7 +255,9 @@ describe('login', () => {
 
     expect(createUserSpy).toHaveBeenCalledTimes(0);
     expect(updateUserSpy).toHaveBeenCalledTimes(1);
-    expect(updateUserSpy).toHaveBeenCalledWith('a96f2809-d6f4-4cef-a02a-3f72edff06d7', expect.objectContaining(user), expect.any(Object));
+    expect(updateUserSpy).toHaveBeenCalledWith(
+      'a96f2809-d6f4-4cef-a02a-3f72edff06d7', expect.objectContaining(user), expect.any(Object)
+    );
   });
 });
 
@@ -298,7 +300,7 @@ describe('searchUsers', () => {
     expect(User.modify).toHaveBeenNthCalledWith(2, 'filterIdentityId', params.identityId);
     expect(User.modify).toHaveBeenNthCalledWith(3, 'filterIdp', params.idp);
     expect(User.modify).toHaveBeenNthCalledWith(4, 'filterUsername', params.username);
-    expect(User.modify).toHaveBeenNthCalledWith(5, 'filterEmail', params.email);
+    expect(User.modify).toHaveBeenNthCalledWith(5, 'filterEmail', params.email, undefined);
     expect(User.modify).toHaveBeenNthCalledWith(6, 'filterFirstName', params.firstName);
     expect(User.modify).toHaveBeenNthCalledWith(7, 'filterFullName', params.fullName);
     expect(User.modify).toHaveBeenNthCalledWith(8, 'filterLastName', params.lastName);

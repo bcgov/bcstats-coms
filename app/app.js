@@ -3,12 +3,14 @@ const compression = require('compression');
 const config = require('config');
 const cors = require('cors');
 const express = require('express');
+const helmet = require('helmet');
 
+const { name: appName, version: appVersion } = require('./package.json');
 const { AuthMode, DEFAULTCORS } = require('./src/components/constants');
 const log = require('./src/components/log')(module.filename);
 const httpLogger = require('./src/components/log').httpLogger;
 const QueueManager = require('./src/components/queueManager');
-const { getAppAuthMode, getGitRevision } = require('./src/components/utils');
+const { getAppAuthMode, getConfigBoolean, getGitRevision } = require('./src/components/utils');
 const DataConnection = require('./src/db/dataConnection');
 const v1Router = require('./src/routes/v1');
 const { readUnique } = require('./src/services/bucket');
@@ -32,6 +34,7 @@ const app = express();
 app.use(compression());
 app.use(cors(DEFAULTCORS));
 app.use(express.urlencoded({ extended: true }));
+app.use(helmet());
 
 // Skip if running tests
 if (process.env.NODE_ENV !== 'test') {
@@ -64,7 +67,7 @@ if (state.authMode === AuthMode.OIDCAUTH || state.authMode === AuthMode.FULLAUTH
 }
 
 // Application privacy Mode mode
-if (config.has('server.privacyMask')) {
+if (getConfigBoolean('server.privacyMask')) {
   log.info('Running COMS with strict content privacy masking');
 } else {
   log.info('Running COMS with permissive content privacy masking');
@@ -90,10 +93,10 @@ apiRouter.get('/', (_req, res) => {
       app: {
         authMode: state.authMode,
         gitRev: state.gitRev,
-        name: process.env.npm_package_name,
+        name: appName,
         nodeVersion: process.version,
-        privacyMask: config.has('server.privacyMask'),
-        version: process.env.npm_package_version
+        privacyMask: getConfigBoolean('server.privacyMask'),
+        version: appVersion
       },
       endpoints: ['/api/v1'],
       versions: [1]
@@ -166,8 +169,12 @@ function checkConnections() {
     dataConnection.checkConnection().then(results => {
       state.connections.data = results;
       state.ready = Object.values(state.connections).every(x => x);
-      if (!wasReady && state.ready) log.info('Application ready to accept traffic', { function: 'checkConnections' });
-      if (wasReady && !state.ready) log.warn('Application not ready to accept traffic', { function: 'checkConnections' });
+      if (!wasReady && state.ready) log.info('Application ready to accept traffic', {
+        function: 'checkConnections'
+      });
+      if (wasReady && !state.ready) log.warn('Application not ready to accept traffic', {
+        function: 'checkConnections'
+      });
       log.silly('App state', { function: 'checkConnections', state: state });
       if (!state.ready) notReadyHandler();
     });
@@ -197,7 +204,7 @@ function initializeConnections() {
       if (state.connections.data) {
         log.info('DataConnection Reachable', { function: 'initializeConnections' });
       }
-      if (config.has('objectStorage.enabled')) {
+      if (getConfigBoolean('objectStorage.enabled')) {
         readUnique(config.get('objectStorage')).then(() => {
           log.error('Default bucket cannot also exist in database', { function: 'initializeConnections' });
           fatalErrorHandler();
@@ -205,7 +212,9 @@ function initializeConnections() {
       }
     })
     .catch(error => {
-      log.error(`Initialization failed: Database OK = ${state.connections.data}`, { function: 'initializeConnections' });
+      log.error(`Initialization failed: Database OK = ${state.connections.data}`, {
+        function: 'initializeConnections'
+      });
       log.error('Connection initialization failure', error.message, { function: 'initializeConnections' });
       if (!state.ready) notReadyHandler();
     })

@@ -26,28 +26,60 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
-    - name: Checkout
-      uses: actions/checkout@v3
-    - name: Login to OpenShift Cluster
-      uses: redhat-actions/oc-login@v1
-      with:
-        openshift_server_url: ${{ secrets.OPENSHIFT_SERVER }}
-        openshift_token: ${{ secrets.OPENSHIFT_TOKEN }}
-        insecure_skip_tls_verify: true
-        namespace: ${{ env.NAMESPACE_PREFIX }}-dev
-    - name: Remove PR Deployment
-      shell: bash
-      run: |
-        helm uninstall --namespace ${{ env.NAMESPACE_PREFIX }}-dev pr-${{ github.event.number }} --timeout 10m --wait
-        oc delete --namespace ${{ env.NAMESPACE_PREFIX }}-dev cm,secret --selector app.kubernetes.io/instance=pr-${{ github.event.number }}
-    - name: Remove Release Comment on PR
-      uses: marocchino/sticky-pull-request-comment@v2
-      with:
-        header: release
-        delete: true
-    - name: Remove Github Deployment Environment
-      uses: strumwolf/delete-deployment-environment@v2
-      with:
-        environment: pr
-        onlyRemoveDeployments: true
-        token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install CLI tools from OpenShift Mirror
+        uses: redhat-actions/openshift-tools-installer@v1
+        with:
+          oc: "4"
+      - name: Login to OpenShift and select project
+        shell: bash
+        run: |
+          # OC Login
+          OC_TEMP_TOKEN=$(curl -k -X POST ${{ secrets.OPENSHIFT_SERVER }}/api/v1/namespaces/${{ env.NAMESPACE_PREFIX }}-dev/serviceaccounts/pipeline/token --header "Authorization: Bearer ${{ secrets.OPENSHIFT_TOKEN }}" -d '{"spec": {"expirationSeconds": 600}}' -H 'Content-Type: application/json; charset=utf-8' | jq -r '.status.token' )
+          oc login --token=$OC_TEMP_TOKEN --server=${{ secrets.OPENSHIFT_SERVER }}
+          # move to project context
+          oc project ${{ env.NAMESPACE_PREFIX }}-dev
+      - name: Remove PR Deployment
+        shell: bash
+        run: |
+          helm uninstall --namespace ${{ env.NAMESPACE_PREFIX }}-dev pr-${{ github.event.number }} --timeout 10m --wait
+          oc delete --namespace ${{ env.NAMESPACE_PREFIX }}-dev cm,secret --selector app.kubernetes.io/instance=pr-${{ github.event.number }}
+
+      # remove user, database and role (named `pr-123`) from postgres
+      - name: Remove PR user and database from postgres.
+        shell: bash
+        run: |
+          USER_TO_REMOVE='{"databases":["pr-${{ github.event.number }}"],"name":"pr-${{ github.event.number }}"}'
+
+          echo 'getting current users from postgres'
+          CURRENT_USERS=$(oc get PostgresCluster/postgres-master -o json | jq '.spec.users')
+          echo "${CURRENT_USERS}"
+
+          # Remove the user from the list,
+          UPDATED_USERS=$(echo "${CURRENT_USERS}" | jq --argjson user "${USER_TO_REMOVE}" 'map(select(. != $user))')
+
+          PATCH_JSON=$(jq -n --argjson users "${UPDATED_USERS}" '{"spec": {"users": $users}}')
+          oc patch PostgresCluster/postgres-master --type=merge -p "${PATCH_JSON}"
+
+          # get primary crunchy pod and remove the role and db
+          CRUNCHY_PG_PRIMARY_POD_NAME=$(oc get pods -l postgres-operator.crunchydata.com/role=master -o json | jq -r '.items[0].metadata.name')
+
+          echo "${CRUNCHY_PG_PRIMARY_POD_NAME}"
+          oc exec "${CRUNCHY_PG_PRIMARY_POD_NAME}" -- psql -c "DROP DATABASE \"pr-${{ github.event.number }}\" WITH (FORCE) --cascade"
+          oc exec "${CRUNCHY_PG_PRIMARY_POD_NAME}" -- psql -c "DROP ROLE \"pr-${{ github.event.number }}\" --cascade"
+          echo 'database and role deleted'
+
+          exit 0
+
+      - name: Remove Release Comment on PR
+        uses: marocchino/sticky-pull-request-comment@v2.9.0
+        with:
+          header: release
+          delete: true
+      - name: Remove Github Deployment Environment
+        uses: strumwolf/delete-deployment-environment@v3
+        with:
+          environment: pr
+          onlyRemoveDeployments: true
+          token: ${{ secrets.GITHUB_TOKEN }}

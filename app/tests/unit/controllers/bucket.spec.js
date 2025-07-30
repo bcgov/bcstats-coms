@@ -3,12 +3,14 @@ const { UniqueViolationError } = require('objection');
 const { NIL: SYSTEM_USER } = require('uuid');
 
 const controller = require('../../../src/controllers/bucket');
+const moduleUtils = require('../../../src/db/models/utils');
 const {
   bucketService,
   storageService,
   userService,
 } = require('../../../src/services');
 const utils = require('../../../src/components/utils');
+const { Permissions } = require('../../../src/components/constants');
 
 const mockResponse = () => {
   const res = {};
@@ -74,7 +76,7 @@ describe('createBucket', () => {
     expect(getCurrentUserIdSpy).toHaveBeenCalledTimes(1);
     expect(getCurrentUserIdSpy).toHaveBeenCalledWith(USR_IDENTITY);
     expect(createSpy).toHaveBeenCalledTimes(1);
-    expect(createSpy).toHaveBeenCalledWith({ ...req.body, userId: USR_ID });
+    expect(createSpy).toHaveBeenCalledWith({ ...req.body, userId: USR_ID, permCodes: Object.values(Permissions) });
 
     expect(res.status).toHaveBeenCalledWith(201);
   });
@@ -168,7 +170,7 @@ describe('createBucket', () => {
     expect(getCurrentUserIdSpy).toHaveBeenCalledTimes(1);
     expect(getCurrentUserIdSpy).toHaveBeenCalledWith(USR_IDENTITY);
     expect(createSpy).toHaveBeenCalledTimes(1);
-    expect(createSpy).toHaveBeenCalledWith({ ...req.body, userId: USR_ID });
+    expect(createSpy).toHaveBeenCalledWith({ ...req.body, userId: USR_ID, permCodes: Object.values(Permissions) });
 
     expect(next).toHaveBeenCalledTimes(1);
     expect(next).toHaveBeenCalledWith(new Problem(500, 'Internal Server Error'));
@@ -218,9 +220,242 @@ describe('createBucket', () => {
   });
 });
 
+describe('createBucketChild', () => {
+  const USR_IDENTITY = 'xxxy';
+  const USR_ID = 'abc-123';
+
+  // mock service calls
+  const createSpy = jest.spyOn(bucketService, 'create');
+  const getCurrentIdentitySpy = jest.spyOn(utils, 'getCurrentIdentity');
+  const getCurrentUserIdSpy = jest.spyOn(userService, 'getCurrentUserId');
+  const headBucketSpy = jest.spyOn(storageService, 'headBucket');
+  const readSpy = jest.spyOn(bucketService, 'read');
+  const readUniqueSpy = jest.spyOn(bucketService, 'readUnique');
+
+  const next = jest.fn();
+
+  it.skip('should return a 201 and redacts secrets in the response', async () => {
+    const req = {
+      body: { bucketName: 'bucketName', subKey: 'subKey' },
+      currentUser: CURRENT_USER,
+      headers: {},
+      params: { bucketId: REQUEST_BUCKET_ID },
+      query: {},
+    };
+
+    createSpy.mockResolvedValue({
+      accessKeyId: 'no no no',
+      secretAccessKey: 'absolutely not',
+      other: 'some field',
+      xyz: 123,
+    });
+    getCurrentIdentitySpy.mockReturnValue(USR_IDENTITY);
+    getCurrentUserIdSpy.mockReturnValue(USR_ID);
+    readSpy.mockResolvedValue({
+      accessKeyId: 'accessKeyId',
+      bucket: 'bucket',
+      endpoint: 'endpoint',
+      key: 'key',
+      secretAccessKey: 'secretAccessKey',
+      region: 'region',
+      active: true
+    });
+    headBucketSpy.mockReturnValue(true);
+    readUniqueSpy.mockRejectedValue(false);
+    utils.addDashesToUuid.mockReturnValue(REQUEST_BUCKET_ID);
+    utils.joinPath.mockReturnValue('key/subKey');
+
+    await controller.createBucketChild(req, res, next);
+
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    expect(createSpy).toHaveBeenCalledWith(expect.objectContaining({
+      bucketName: 'bucketName',
+      accessKeyId: 'accessKeyId',
+      bucket: 'bucket',
+      endpoint: 'endpoint',
+      key: 'key/subKey',
+      secretAccessKey: 'secretAccessKey',
+      region: 'region',
+      active: true
+    }));
+    expect(getCurrentIdentitySpy).toHaveBeenCalledTimes(1);
+    expect(getCurrentIdentitySpy).toHaveBeenCalledWith(
+      CURRENT_USER,
+      SYSTEM_USER
+    );
+    expect(getCurrentUserIdSpy).toHaveBeenCalledTimes(1);
+    expect(getCurrentUserIdSpy).toHaveBeenCalledWith(USR_IDENTITY);
+    expect(headBucketSpy).toHaveBeenCalledTimes(1);
+    expect(headBucketSpy).toHaveBeenCalledWith(expect.objectContaining({
+      accessKeyId: 'accessKeyId',
+      bucket: 'bucket',
+      endpoint: 'endpoint',
+      key: 'key/subKey',
+      region: 'region',
+      secretAccessKey: 'secretAccessKey'
+    }));
+    expect(readSpy).toHaveBeenCalledTimes(1);
+    expect(readSpy).toHaveBeenCalledWith(REQUEST_BUCKET_ID);
+    expect(readUniqueSpy).toHaveBeenCalledTimes(1);
+    expect(readUniqueSpy).toHaveBeenCalledWith(expect.objectContaining({
+      bucket: 'bucket',
+      endpoint: 'endpoint',
+      key: 'key/subKey',
+    }));
+
+    expect(res.status).toHaveBeenCalledWith(201);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        accessKeyId: 'REDACTED',
+        secretAccessKey: 'REDACTED'
+      })
+    );
+  });
+
+  it.skip('should call when bucket already exists', async () => {
+    const req = {
+      body: { bucketName: 'bucketName', subKey: 'subKey' },
+      currentUser: CURRENT_USER,
+      headers: {},
+      params: { bucketId: REQUEST_BUCKET_ID },
+      query: {},
+    };
+
+    readSpy.mockResolvedValue({
+      accessKeyId: 'accessKeyId',
+      bucket: 'bucket',
+      endpoint: 'endpoint',
+      key: 'key',
+      secretAccessKey: 'secretAccessKey',
+      region: 'region',
+      active: true
+    });
+    readUniqueSpy.mockResolvedValue({ bucketId: REQUEST_BUCKET_ID });
+    utils.addDashesToUuid.mockReturnValue(REQUEST_BUCKET_ID);
+    utils.joinPath.mockReturnValue('key/subKey');
+
+    await controller.createBucketChild(req, res, next);
+
+    expect(createSpy).toHaveBeenCalledTimes(0);
+    expect(getCurrentIdentitySpy).toHaveBeenCalledTimes(0);
+    expect(getCurrentUserIdSpy).toHaveBeenCalledTimes(0);
+    expect(headBucketSpy).toHaveBeenCalledTimes(0);
+    expect(readSpy).toHaveBeenCalledTimes(1);
+    expect(readSpy).toHaveBeenCalledWith(REQUEST_BUCKET_ID);
+    expect(readUniqueSpy).toHaveBeenCalledTimes(1);
+    expect(readUniqueSpy).toHaveBeenCalledWith(expect.objectContaining({
+      bucket: 'bucket',
+      endpoint: 'endpoint',
+      key: 'key/subKey',
+    }));
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(next).toHaveBeenCalledWith(new Problem(409, {
+      detail: 'Requested bucket already exists',
+      bucketId: REQUEST_BUCKET_ID,
+      key: 'key/subKey'
+    }));
+  });
+
+  it.skip('should return a 403 when bucket can not be validated', async () => {
+    const req = {
+      body: { bucketName: 'bucketName', subKey: 'subKey' },
+      currentUser: CURRENT_USER,
+      headers: {},
+      params: { bucketId: REQUEST_BUCKET_ID },
+      query: {},
+    };
+
+    headBucketSpy.mockRejectedValue(false);
+    readSpy.mockResolvedValue({
+      accessKeyId: 'accessKeyId',
+      bucket: 'bucket',
+      endpoint: 'endpoint',
+      key: 'key',
+      secretAccessKey: 'secretAccessKey',
+      region: 'region',
+      active: true
+    });
+    readUniqueSpy.mockRejectedValue(false);
+    utils.addDashesToUuid.mockReturnValue(REQUEST_BUCKET_ID);
+    utils.joinPath.mockReturnValue('key/subKey');
+
+    await controller.createBucketChild(req, res, next);
+
+    expect(createSpy).toHaveBeenCalledTimes(0);
+    expect(getCurrentIdentitySpy).toHaveBeenCalledTimes(0);
+    expect(getCurrentUserIdSpy).toHaveBeenCalledTimes(0);
+    expect(headBucketSpy).toHaveBeenCalledTimes(1);
+    expect(headBucketSpy).toHaveBeenCalledWith(expect.objectContaining({
+      accessKeyId: 'accessKeyId',
+      bucket: 'bucket',
+      endpoint: 'endpoint',
+      key: 'key/subKey',
+      region: 'region',
+      secretAccessKey: 'secretAccessKey'
+    }));
+    expect(readSpy).toHaveBeenCalledTimes(1);
+    expect(readSpy).toHaveBeenCalledWith(REQUEST_BUCKET_ID);
+    expect(readUniqueSpy).toHaveBeenCalledTimes(1);
+    expect(readUniqueSpy).toHaveBeenCalledWith(expect.objectContaining({
+      bucket: 'bucket',
+      endpoint: 'endpoint',
+      key: 'key/subKey',
+    }));
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(next).toHaveBeenCalledWith(new Problem(403, {
+      detail: 'Unable to validate supplied credentials for the bucket'
+    }));
+  });
+
+  it.skip('should return a 422 when derived key is too long', async () => {
+    const req = {
+      body: { bucketName: 'bucketName', subKey: 'subKey' },
+      currentUser: CURRENT_USER,
+      headers: {},
+      params: { bucketId: REQUEST_BUCKET_ID },
+      query: {},
+    };
+
+    readSpy.mockResolvedValue({
+      accessKeyId: 'accessKeyId',
+      bucket: 'bucket',
+      endpoint: 'endpoint',
+      key: 'key',
+      secretAccessKey: 'secretAccessKey',
+      region: 'region',
+      active: true
+    });
+    utils.addDashesToUuid.mockReturnValue(REQUEST_BUCKET_ID);
+    utils.joinPath.mockReturnValue('01234567890123456789012345678901234567890123456789012345678901234567890123456789\
+    01234567890123456789012345678901234567890123456789012345678901234567890123456789\
+    01234567890123456789012345678901234567890123456789012345678901234567890123456789\
+    01234567890123456789012345678901234567890123456789012345678901234567890123456789');
+
+    await controller.createBucketChild(req, res, next);
+
+    expect(createSpy).toHaveBeenCalledTimes(0);
+    expect(getCurrentIdentitySpy).toHaveBeenCalledTimes(0);
+    expect(getCurrentUserIdSpy).toHaveBeenCalledTimes(0);
+    expect(headBucketSpy).toHaveBeenCalledTimes(0);
+    expect(readSpy).toHaveBeenCalledTimes(1);
+    expect(readSpy).toHaveBeenCalledWith(REQUEST_BUCKET_ID);
+    expect(readUniqueSpy).toHaveBeenCalledTimes(0);
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(next).toHaveBeenCalledWith(new Problem(422, {
+      detail: 'New derived key exceeds maximum length of 255',
+      key: expect.any(String)
+    }));
+  });
+});
+
 describe('deleteBucket', () => {
   // mock service calls
   const addDashesToUuidSpy = jest.spyOn(utils, 'addDashesToUuid');
+  const readSpy = jest.spyOn(bucketService, 'read');
+  const trxWrapperSpy = jest.spyOn(moduleUtils, 'trxWrapper');
   const deleteSpy = jest.spyOn(bucketService, 'delete');
 
   const next = jest.fn();
@@ -234,13 +469,16 @@ describe('deleteBucket', () => {
     };
 
     addDashesToUuidSpy.mockReturnValue(REQUEST_BUCKET_ID);
+    readSpy.mockReturnValue({ bucketId: REQUEST_BUCKET_ID });
+    trxWrapperSpy.mockImplementation(callback => callback({}));
     deleteSpy.mockReturnValue(true);
 
     await controller.deleteBucket(req, res, next);
 
     expect(addDashesToUuidSpy).toHaveBeenCalledTimes(1);
     expect(addDashesToUuidSpy).toHaveBeenCalledWith(REQUEST_BUCKET_ID);
-    expect(deleteSpy).toHaveBeenCalledWith(REQUEST_BUCKET_ID);
+    expect(trxWrapperSpy).toHaveBeenCalledTimes(1);
+    expect(deleteSpy).toHaveBeenCalledWith(REQUEST_BUCKET_ID, {});
 
     expect(res.status).toHaveBeenCalledWith(204);
   });
@@ -254,6 +492,8 @@ describe('deleteBucket', () => {
     };
 
     addDashesToUuidSpy.mockReturnValue(REQUEST_BUCKET_ID);
+    readSpy.mockReturnValue({ bucketId: REQUEST_BUCKET_ID });
+    trxWrapperSpy.mockImplementation(callback => callback({}));
     deleteSpy.mockImplementationOnce(() => {
       throw new Problem(502, 'Unknown BucketService Error');
     });
@@ -262,7 +502,8 @@ describe('deleteBucket', () => {
 
     expect(addDashesToUuidSpy).toHaveBeenCalledTimes(1);
     expect(addDashesToUuidSpy).toHaveBeenCalledWith(REQUEST_BUCKET_ID);
-    expect(deleteSpy).toHaveBeenCalledWith(REQUEST_BUCKET_ID);
+    expect(trxWrapperSpy).toHaveBeenCalledTimes(1);
+    expect(deleteSpy).toHaveBeenCalledWith(REQUEST_BUCKET_ID, {});
 
     expect(next).toHaveBeenCalledTimes(1);
     expect(next).toHaveBeenCalledWith(

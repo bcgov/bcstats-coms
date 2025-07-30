@@ -25,8 +25,7 @@ const currentUpload = (strict = false) => {
     const disposition = req.get('Content-Disposition');
     if (disposition) {
       try {
-        const { type, parameters } = contentDisposition.parse(disposition);
-        if (strict && !type || type !== 'attachment') throw new Error('Disposition type is not \'attachment\'');
+        const parameters = contentDisposition.parse(disposition).parameters;
         if (strict && !parameters?.filename) throw new Error('Disposition missing \'filename\' parameter');
         filename = parameters?.filename;
       } catch (e) {
@@ -44,7 +43,7 @@ const currentUpload = (strict = false) => {
     }
 
     // Check Content-Type Header
-    const mimeType = req.get('Content-Type') ?? 'application/octet-stream';
+    const mimeType = req.get('Content-Type') || 'application/octet-stream';
 
     req.currentUpload = Object.freeze({
       contentLength: contentLength,

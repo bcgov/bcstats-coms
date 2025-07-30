@@ -112,40 +112,78 @@ const service = {
    * @param {string} [params.name] Optional metadata name string to match on
    * @param {object} [params.metadata] Optional object of metadata key/value pairs
    * @param {object} [params.tag] Optional object of tag key/value pairs
+   * @param {object} [params.limit] Optional number of records to limit by
+   * @param {object} [params.order] Optional column attribute to order by
+   * @param {object} [params.page] Optional page set to return
+   * @param {object} [params.sort] Optional `asc` or `desc` sort ordering
    * @param {object} [etrx=undefined] An optional Objection Transaction object
-   * @returns {Promise<object[]>} The result of running the find operation
+   * @returns {Promise<{total: number, data: object[]}>} The find operation result containing the `total` length of
+   * the search query, and the relevant array of COMS objects.
    */
   searchObjects: async (params, etrx = undefined) => {
     let trx;
+    let response = {};
     try {
       trx = etrx ? etrx : await ObjectModel.startTransaction();
-
-      const response = await ObjectModel.query(trx)
-        .allowGraph('version')
+      // GroupBy() seems to be working faster with ObjectionJS Graphs
+      // when comparing with distinct()
+      response.data = await ObjectModel.query(trx)
+        .allowGraph('[bucketPermission, objectPermission, version]')
+        .groupBy('object.id')
+        // object
         .modify('filterIds', params.id)
         .modify('filterBucketIds', params.bucketId)
         .modify('filterName', params.name)
         .modify('filterPath', params.path)
         .modify('filterPublic', params.public)
         .modify('filterActive', params.active)
-        .modify('filterMimeType', params.mimeType)
-        .modify('filterDeleteMarker', params.deleteMarker)
-        .modify('filterLatest', params.latest)
+        // version
+        .modify('filterVersionAttributes',
+          params.mimeType, params.deleteMarker, params.latest, params.versionId, params.s3VersionId
+        )
+        // meta/tag
         .modify('filterMetadataTag', {
           metadata: params.metadata,
           tag: params.tag
         })
+        // permissions
         .modify('hasPermission', params.userId, 'READ')
-        // format result
+        // pagination
+        .modify('pagination', params.page, params.limit)
+        // sort results
+        .modify('sortOrder', params.sort, params.order)
+        // format response
         .then(result => {
-          // just return object table records
-          const res = result.map(row => {
-            // eslint-disable-next-line no-unused-vars
-            const { objectPermission, bucketPermission, version, ...object } = row;
-            return object;
-          });
-          // remove duplicates
-          return [...new Map(res.map(item => [item.id, item])).values()];
+          let results = [];
+          if (Object.hasOwn(result, 'results')) {
+            results = result.results;
+            response.total = result.total;
+          } else {
+            results = result;
+            response.total = result.length;
+          }
+          return Promise.all(
+            results.map(row => {
+              // eslint-disable-next-line no-unused-vars
+              const { objectPermission, bucketPermission, version, ...object } = row;
+              if (row.id && params.permissions) {
+                object.permissions = [];
+                if (objectPermission && params.userId && params.userId !== SYSTEM_USER) {
+                  object.permissions = objectPermission
+                    .filter(p => p.userId === params.userId) // Filter down to only current user
+                    .map(o => o.permCode);
+                }
+              }
+              if (Array.isArray(version) && version.length > 0) {
+                const latestVersion = version.find(v => v.isLatest);
+
+                object.lastModifiedDate =
+                  latestVersion.lastModifiedDate ?? latestVersion.createdAt ?? latestVersion.updatedAt;
+              }
+
+              return object;
+            }).filter(x => x) // Drop empty row results from the array set
+          );
         });
 
       if (!etrx) await trx.commit();
@@ -182,6 +220,30 @@ const service = {
   },
 
   /**
+   * @function exists
+   * Checks if an object db record exists
+   * @param {string} objId The object uuid to read
+   * @param {object} [etrx=undefined] An optional Objection Transaction object
+   * @returns {Promise<object>} true if object exists in db, false otherwise
+   * @throws The error encountered upon db transaction failure
+   */
+  exists: async (objId, etrx = undefined) => {
+    let trx;
+    try {
+      trx = etrx ? etrx : await ObjectModel.startTransaction();
+
+      const response = await ObjectModel.query(trx).findById(objId);
+
+      if (!etrx) await trx.commit();
+
+      return response ? true : false;
+    } catch (err) {
+      if (!etrx && trx) await trx.rollback();
+      throw err;
+    }
+  },
+
+  /**
    * @function update
    * Update an object DB record
    * @param {string} data.id The object uuid
@@ -189,6 +251,8 @@ const service = {
    * @param {string} data.path The relative S3 key/path of the object
    * @param {boolean} [data.public] The optional public flag - defaults to true if undefined
    * @param {boolean} [data.active] The optional active flag - defaults to true if undefined
+   * @param {string} [data.lastSyncedDate] The last time a sync request was made for the object.
+   * Should be left undefined if not part of a sync operation
    * @param {object} [etrx=undefined] An optional Objection Transaction object
    * @returns {Promise<object>} The result of running the patch operation
    * @throws The error encountered upon db transaction failure
@@ -203,7 +267,8 @@ const service = {
         path: data.path,
         public: data.public,
         active: data.active,
-        updatedBy: data.userId ?? SYSTEM_USER
+        updatedBy: data.userId ?? SYSTEM_USER,
+        lastSyncedDate: data.lastSyncedDate
       });
 
       if (!etrx) await trx.commit();

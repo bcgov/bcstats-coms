@@ -4,7 +4,7 @@ const log = require('../components/log')(module.filename);
 const utils = require('../db/models/utils');
 
 const { ObjectModel, Version } = require('../db/models');
-const { getKeyValue, toLowerKeys } = require('../components/utils');
+const { getKeyValue, getUniqueObjects, toLowerKeys } = require('../components/utils');
 
 const metadataService = require('./metadata');
 const objectService = require('./object');
@@ -21,26 +21,40 @@ const service = {
    * @function _deriveObjectId
    * Checks an S3 Object for any previous `coms-id` tag traces and returns it if found.
    * Otherwise it writes a new `coms-id` to the S3 Object if none were previously found.
+   * If the `coms-id` conflicts with an existing COMS object, it is replaced with a new one.
    * @param {object | boolean} s3Object The result of an S3 HeadObject operation
    * @param {string} path String representing the canonical path for the specified object
    * @param {string | null} bucketId uuid of bucket or `null` if syncing object in default bucket
-   * @returns {Promise<string>} Resolves to an existing objectId or creates a new one
+   * @returns {Promise<string>} Resolves to an existing objectId (if not already in COMS)
+   *                            or creates a new one
    */
   _deriveObjectId: async (s3Object, path, bucketId) => {
     let objId = uuidv4();
 
     if (typeof s3Object === 'object') { // If regular S3 Object
-      const TagSet = await storageService.getObjectTagging({ filePath: path, bucketId: bucketId }).then(result => result.TagSet ?? []);
+      let TagSet = await storageService.getObjectTagging({ filePath: path, bucketId: bucketId })
+        .then(result => result.TagSet ?? []);
+
       const s3ObjectComsId = TagSet.find(obj => (obj.Key === 'coms-id'))?.Value;
 
-      if (s3ObjectComsId && uuidValidate(s3ObjectComsId)) {
+      if (s3ObjectComsId
+        && uuidValidate(s3ObjectComsId)
+        && !(await objectService.exists(s3ObjectComsId))) {
+        // re-use existing coms-id (if no conflict)
         objId = s3ObjectComsId;
-      } else { // Update S3 Object if there is still remaining space in the TagSet
-        if (TagSet.length < 10) { // putObjectTagging replaces S3 tags so new TagSet must contain existing values
+      } else {
+        // remove `coms-id` tag since it conflicts with an existing COMS object
+        TagSet = TagSet.filter(x => x.Key != 'coms-id');
+
+        // Update S3 Object if there is still remaining space in the TagSet
+        if (TagSet.length < 10) {
+          // putObjectTagging replaces S3 tags so new TagSet must contain existing values
           await storageService.putObjectTagging({
             filePath: path,
             bucketId: bucketId,
             tags: TagSet.concat([{ Key: 'coms-id', Value: objId }])
+          }).catch((err) => {
+            log.warn(`Unable to add coms-id tag: ${err.message}`, { function: '_deriveObjectId' });
           });
         }
       }
@@ -140,35 +154,62 @@ const service = {
           .catch((e) => { // return boolean true if object is soft-deleted in S3
             return !!e.$response.headers['x-amz-delete-marker'];
           })
-      ]).then(settled => settled.map(promise => Array.isArray(promise.value) ? promise.value[0] : promise.value));
+      ]).then(([comsPromise, s3Promise]) => ([comsPromise.value?.data[0], s3Promise.value]));
 
-      // Case: already synced - record object only
-      if (comsObject && s3Object) response = comsObject;
+      if (s3Object) {
+        // Determine S3 Public status
+        let s3Public;
+        try {
+          s3Public = await storageService.getObjectPublic({ filePath: path, bucketId: bucketId });
+        } catch (e) {
+          // Gracefully continue even when S3 ACL management operation fails
+          log.warn(`Failed to read ACL permissions from S3: ${e.message}`, {
+            function: 'syncObject', filePath: path, bucketId: bucketId
+          });
+        }
 
-      // Case: not in COMS - insert new COMS object
-      else if (!comsObject && s3Object) {
-        const objId = await service._deriveObjectId(s3Object, path, bucketId);
+        // Case: already synced - update public status as needed
+        if (comsObject) {
 
-        response = await objectService.create({
-          id: objId,
-          name: path.match(/(?!.*\/)(.*)$/)[0], // get `name` column
-          path: path,
-          bucketId: bucketId,
-          userId: userId
-        }, trx);
+          response = await objectService.update({
+            id: comsObject.id,
+            userId: userId,
+            path: comsObject.path,
+            public: s3Public,
+            lastSyncedDate: new Date().toISOString()
+          }, trx);
 
-        modified = true;
-      }
+          // if public flag changed mark as modified
+          if (s3Public !== comsObject.public) modified = true;
+        }
 
-      // Case: missing in S3 - drop COMS object
-      else if (comsObject && !s3Object) {
-        // Delete COMS Object and cascade all child records from COMS
-        await objectService.delete(comsObject.id, trx);
+        // Case: not in COMS - insert new COMS object
+        else {
+          const objId = await service._deriveObjectId(s3Object, path, bucketId);
 
-        // TODO: Relatively slow operations - determine if this can be optimized
-        // Prune metadata and tag records
-        await metadataService.pruneOrphanedMetadata(trx);
-        await tagService.pruneOrphanedTags(trx);
+          response = await objectService.create({
+            id: objId,
+            name: path.match(/(?!.*\/)(.*)$/)[0], // get `name` column
+            path: path,
+            public: s3Public,
+            bucketId: bucketId,
+            userId: userId,
+            lastSyncedDate: new Date().toISOString()
+          }, trx);
+
+          modified = true;
+        }
+      } else {
+        // Case: missing in S3 - drop COMS object
+        if (comsObject) {
+          // Delete COMS Object and cascade all child records from COMS
+          await objectService.delete(comsObject.id, trx);
+
+          // TODO: Relatively slow operations - determine if this can be optimized
+          // Prune metadata and tag records
+          await metadataService.pruneOrphanedMetadata(trx);
+          await tagService.pruneOrphanedTags(trx);
+        }
       }
 
       if (!etrx) await trx.commit();
@@ -207,12 +248,27 @@ const service = {
         .map(dm => ({ DeleteMarker: true, ...dm }))
         .concat(s3VersionsRaw.Versions);
 
-      // Drop versions in COMS that are no longer in S3
-      await Promise.all(comsVersions.map(async cv => {
-        if (cv.s3VersionId && !s3Versions.some(s3v => (s3v.VersionId === cv.s3VersionId))) {
-          await versionService.delete(comsObject.id, (cv.s3VersionId ?? null), userId, trx);
-        }
-      }));
+      // delete versions from COMS that are not in S3
+      // get list of unique coms versions
+      const uniqueCVIds = getUniqueObjects(comsVersions, 's3VersionId').map(v => v.id);
+
+      // get COMS versions that are not in S3 (matching on s3VersionId) OR not
+      // in list of unique COMS versions (matching on id)
+      const cVsToDelete = comsVersions.filter(cv => {
+        const notInS3 = !s3Versions.some(s3v => (s3v.VersionId === String(cv.s3VersionId)));
+        const isDuplicate = !uniqueCVIds.includes(cv.id);
+        return notInS3 || isDuplicate;
+      });
+
+      if (cVsToDelete.length) {
+        await Version.query(trx)
+          .delete()
+          .where('objectId', comsObject.id)
+          .whereNotNull('s3VersionId')
+          .whereIn('id', cVsToDelete.map(cv => cv.id));
+      }
+      // delete versions from comsVersions array for further comparisons
+      const comsVersionsToKeep = comsVersions.filter(cv => !cVsToDelete.some(v => cv.id === v.id));
 
       // Add and Update versions in COMS
       const response = await Promise.all(s3Versions.map(async s3Version => {
@@ -233,18 +289,25 @@ const service = {
               mimeType: mimeType,
               id: comsObject.id,
               etag: s3Version.ETag,
-              isLatest: true
+              isLatest: true,
+              lastModifiedDate: s3Version.LastModified ? new Date(s3Version.LastModified).toISOString() : undefined
             }, userId, trx);
             return { modified: true, version: newVersion };
           }
 
           // Latest version has different values
-          else if (existingVersion.mimeType !== mimeType || existingVersion.etag !== s3Version.ETag) {
+          else if (
+            existingVersion.mimeType !== mimeType ||
+            existingVersion.etag != s3Version.ETag ||
+            existingVersion.lastModifiedDate != (s3Version.LastModified ?
+              new Date(s3Version.LastModified).toISOString() : undefined)
+          ) {
             const updatedVersion = await versionService.update({
               mimeType: mimeType,
               id: comsObject.id,
               etag: s3Version.ETag,
-              isLatest: true
+              isLatest: true,
+              lastModifiedDate: s3Version.LastModified ? new Date(s3Version.LastModified).toISOString() : undefined
             }, userId, trx);
             return { modified: true, version: updatedVersion };
           }
@@ -252,18 +315,35 @@ const service = {
           // Version record not modified
           else return { version: existingVersion };
         }
-
         // S3 Object is in versioned bucket (ie: if VersionId is not 'null')
         else {
-          const comsVersion = comsVersions.find(cv => cv.s3VersionId === s3Version.VersionId);
+          const comsVersion = comsVersionsToKeep.find(cv => cv.s3VersionId === s3Version.VersionId);
 
           if (comsVersion) { // Version is in COMS
-            if (s3Version.IsLatest) { // Patch isLatest flags if changed
-              const updated = await versionService.updateIsLatest(comsVersion.id, trx);
-              return { modified: true, version: updated };
-            } else { // Version record not modified
-              return { version: comsVersion };
+            let modified, updated;
+
+            // Recorded version has different values
+            if (
+              comsVersion.etag != s3Version.ETag ||
+              comsVersion.lastModifiedDate != (s3Version.LastModified ?
+                new Date(s3Version.LastModified).toISOString() : undefined)
+            ) {
+              modified = true;
+              updated = await versionService.update({
+                id: comsObject.id,
+                s3VersionId: s3Version.VersionId,
+                etag: s3Version.ETag,
+                lastModifiedDate: s3Version.LastModified ? new Date(s3Version.LastModified).toISOString() : undefined
+              }, userId, trx);
             }
+
+            // Patch isLatest flags if changed
+            if (s3Version.IsLatest) {
+              modified = true;
+              updated = await versionService.updateIsLatest(comsObject.id, trx);
+            }
+
+            return { modified: modified, version: updated ?? comsVersion };
           } else { // Version is not in COMS
             const mimeType = s3Version.DeleteMarker
               ? undefined // Will default to 'application/octet-stream'
@@ -279,7 +359,8 @@ const service = {
               id: comsObject.id,
               deleteMarker: s3Version.DeleteMarker,
               etag: s3Version.ETag,
-              isLatest: s3Version.IsLatest
+              isLatest: s3Version.IsLatest,
+              lastModifiedDate: s3Version.LastModified ? new Date(s3Version.LastModified).toISOString() : undefined
             }, userId, trx);
             // add to response with `newVersion` attribute, required for sync tags/meta logic
             return { modified: true, version: newVersion };
@@ -312,7 +393,7 @@ const service = {
       trx = etrx ? etrx : await Version.startTransaction();
       let response = [];
 
-      // Fetch COMS Object record if necessary
+      // Fetch COMS version record if necessary
       const comsVersion = typeof version === 'object' ? version : await versionService.get({ versionId: version }, trx);
 
       // Short circuit if version is a delete marker
@@ -328,20 +409,32 @@ const service = {
       const comsTags = comsTagsForVersion[0]?.tagset ?? [];
       // S3 Tags
       const s3Tags = toLowerKeys(s3TagsForVersion?.TagSet ?? []);
-
-      // Ensure `coms-id` tag exists on this version in S3
-      if (s3Tags.length < 10 && !s3Tags.find(s3T => s3T.key === 'coms-id')) {
-        await storageService.putObjectTagging({
-          filePath: path,
-          tags: (s3TagsForVersion?.TagSet ?? []).concat([{
-            Key: 'coms-id',
-            Value: comsVersion.objectId
-          }]),
-          s3VersionId: comsVersion.s3VersionId,
-          bucketId: bucketId,
-        });
-        // add to our arrays for comaprison
-        s3Tags.push({ key: 'coms-id', value: comsVersion.objectId });
+      /**
+       * Add coms-id tag to latest version in S3 if not already present
+       * NOTE: For a sync job the _deriveObjectId() function will have already added
+       * the coms-id to latest version.
+       * TODO: check if this version is still also the latest on corresponding version in S3
+       */
+      if (comsVersion.isLatest && s3Tags.length < 10 && !s3Tags.find(s3T => s3T.key === 'coms-id')) {
+        /**
+         * NOTE: adding tags to a specified version (passing a `VersionId` parameter) will affect `Last Modified`
+         * attribute of multiple versions on some s3 storage providors including Dell ECS
+         */
+        try {
+          await storageService.putObjectTagging({
+            filePath: path,
+            tags: (s3TagsForVersion?.TagSet ?? []).concat([{
+              Key: 'coms-id',
+              Value: comsVersion.objectId
+            }]),
+            bucketId: bucketId,
+            // s3VersionId: comsVersion.s3VersionId,
+          });
+          // add to our arrays for comaprison
+          s3Tags.push({ key: 'coms-id', value: comsVersion.objectId });
+        } catch (err) {
+          log.warn(`Unable to add coms-id tag: ${err.message}`, { function: 'syncTags' });
+        }
       }
 
       // Dissociate Tags not in S3

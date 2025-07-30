@@ -37,7 +37,7 @@ const service = {
    * Adds a set of jobs to the object queue. If the same job already exists, the existing
    * job will take precedence and will not be reinserted.
    * @param {object[]} options.jobs An array of job objects typically containing `path` and `bucketId` attributes
-   * @param {boolean} [options.full=false] Optional boolean indicating whether to execute full recursive run
+   * @param {boolean} [options.full=false] Optional boolean whether to sync related versions, tags, metadata
    * @param {integer} [options.retries=0] Optional integer indicating how many previous retries this job has had
    * @param {string} [options.createdBy=SYSTEM_USER] Optional uuid attributing which user added the job
    * @param {object} [etrx=undefined] Optional Objection Transaction object
@@ -72,11 +72,16 @@ const service = {
 
   /**
    * @function queueSize
-   * Returns the number of jobs currently waiting for processing in the object queue.
+   * Returns the number of jobs currently waiting for processing in the object queue,
+   * optionally filtered by the bucketId(s)
+   * @param {string[]} optional array of bucketIds
    * @returns {Promise<number>} An integer representing how many jobs are in the queue.
    */
-  async queueSize() {
-    return ObjectQueue.query().count().first()
+  async queueSize(bucketIds) {
+    return ObjectQueue.query()
+      .modify('filterBucketIds', bucketIds)
+      .count()
+      .first()
       .then(response => parseInt(response.count));
   },
 };

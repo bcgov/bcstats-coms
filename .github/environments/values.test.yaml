@@ -6,12 +6,14 @@ features:
 
 autoscaling:
   enabled: true
-  maxReplicas: 4
+pdb:
+  enabled: true
 
 config:
   enabled: true
   configMap:
     BASICAUTH_ENABLED: "true"
+    S3ACCESSMODE_ENABLED: "true"
     DB_PORT: "5432"
     KC_ENABLED: "true"
     KC_IDENTITYKEY: idir_user_guid,bceid_user_guid
@@ -25,5 +27,105 @@ config:
     SERVER_PRIVACY_MASK: "true"
     SERVER_TEMP_EXPIRESIN: "300"
 
-patroni:
+postgres:
   enabled: true
+
+  # --------------------------------
+  # --------crunchydb config: ------
+  # --------------------------------
+
+  # --- resource allocation ----
+  instances:
+    - name: db # do not change this name after initial install, pvc (data) and stateful sets will be deleted
+      replicas: 3
+      dataVolumeClaimSpec:
+        accessModes:
+          - "ReadWriteOnce"
+        resources:
+          requests:
+            storage: 5Gi
+        storageClassName: "netapp-block-standard"
+      resources:
+        requests:
+          cpu: 256m
+          memory: 512Mi
+        limits:
+          cpu: 512m
+          memory: 1024Mi
+      sidecars:
+        replicaCertCopy:
+          resources:
+            requests:
+              cpu: 25m
+              memory: 50Mi
+
+  # -------- backups ---------
+  pgBackRestConfig:
+    manual:
+      repoName: repo1
+      options:
+        - --type=full
+    repoHost:
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+    sidecars:
+      pgbackrest:
+        resources:
+          requests:
+            cpu: 50m
+            memory: 50Mi
+      pgbackrestConfig:
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+    jobs:
+      resources:
+        requests:
+          cpu: 20m
+          memory: 64Mi
+    configuration:
+      # secret for saving backups to S3
+      - secret:
+          name: pgbackrest-s3
+    global:
+      # log-level-console: debug
+      # --- pvc
+      repo1-retention-full: "1"
+      repo1-retention-diff: "5"
+      # --- s3
+      repo2-path: /backups/common-object-management-service/postgres/test
+      repo2-retention-full: "1"
+      repo2-retention-diff: "30"
+      repo2-s3-uri-style: path
+    repos:
+      - name: repo1
+        schedules:
+          full: "0 14 15 * *" # full backup at 14:00 on day-of-month 15
+          differential: "30 */2 * * *" # differential at minute 30 past every 2nd hour
+        volume:
+          volumeClaimSpec:
+            accessModes:
+              - "ReadWriteOnce"
+            resources:
+              requests:
+                storage: 10Gi
+            storageClassName: "netapp-file-backup"
+      - name: repo2
+        schedules:
+          full: "0 2 1 * *" # full backup at 02:00 on day-of-month 1
+          differential: "0 */2 * * *" # differential every 2 hours
+        s3:
+          bucket: csstops
+          endpoint: https://nrs.objectstore.gov.bc.ca
+          region: us-east-1
+    # -- restore from backup
+    # ref: https://access.crunchydata.com/documentation/postgres-operator/latest/tutorials/backups-disaster-recovery/disaster-recovery#perform-an-in-place-point-in-time-recovery-pitr
+    restore:
+      enabled: false
+      repoName: repo1 # eg `repo1` (pvc) or `repo2` (s3)
+      options:
+        - --type=time
+        - --target="2024-10-28 14:15:11-04"

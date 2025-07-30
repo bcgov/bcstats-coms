@@ -1,4 +1,7 @@
 module.exports = Object.freeze({
+  /** S3 All Users Predefined group URI */
+  ALLUSERS: 'http://acs.amazonaws.com/groups/global/AllUsers',
+
   /** Application authentication mode */
   AuthMode: {
     /** Only Basic Authentication */
@@ -21,12 +24,22 @@ module.exports = Object.freeze({
     NONE: 'NONE'
   },
 
+  /**
+   * In COMS 'strict mode', users specific with token idp's (eg: idir)
+   * are given additional permissions.
+  */
+  ElevatedIdps: [
+    'idir'
+  ],
+
   /** Default CORS settings used across the entire application */
   DEFAULTCORS: {
     /** Tells browsers to cache preflight requests for Access-Control-Max-Age seconds */
     maxAge: 600,
     /** Set true to dynamically set Access-Control-Allow-Origin based on Origin */
-    origin: true
+    origin: true,
+    /** Configures the Access-Control-Expose-Headers CORS header */
+    exposedHeaders: 'X-Total-Rows',
   },
 
   /** Need to specify valid AWS region or it'll explode ('us-east-1' is default, 'ca-central-1' for Canada) */
@@ -54,6 +67,9 @@ module.exports = Object.freeze({
 
   /** Maximum Content Length supported by S3 CopyObjectCommand */
   MAXFILEOBJECTLENGTH: 5 * 1024 * 1024 * 1024 * 1024, // 5 TB
+
+  /** Maximum object key length supported by S3 */
+  MAXOBJECTKEYLENGTH: 1024, // 1024 B
 
   /** Allowable values for the Metadata Directive parameter */
   MetadataDirective: {
@@ -86,5 +102,37 @@ module.exports = Object.freeze({
     DELETE: 'DELETE',
     /** Grants resource permission management */
     MANAGE: 'MANAGE'
+  },
+
+  /** Only permissions allowed for bucket invite */
+  InviteBucketAllowedPermissions: {
+    /** Grants resource creation permission */
+    CREATE: 'CREATE',
+    // /** Grants resource read permission */
+    READ: 'READ',
+    /** Grants resource update permission */
+    UPDATE: 'UPDATE',
+  },
+
+  /** Only permissions allowed for object invite */
+  InviteObjectAllowedPermissions: {
+    /** Grants resource creation permission */
+    CREATE: 'UPDATE',
+    /** Grants resource read permission */
+    READ: 'READ',
+  },
+
+  /** Resource types */
+  ResourceType: {
+    /** Bucket Type */
+    BUCKET: 'bucketId',
+    /** Object Type */
+    OBJECT: 'objectId'
+  },
+
+  /** Sort Order */
+  SortOrder: {
+    ASC: 'asc',
+    DESC: 'desc'
   }
 });
