@@ -193,7 +193,7 @@ postgres:
   # name of the cluster.
   # in COMS pipeline we pass this in Helm deploy command in github action
   # eg: --set postgres.name=postgres-master
-  # name: postgres-master
+  name: postgres-master
 
   postgresVersion: 16
   openshift: true
