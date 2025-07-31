@@ -1,7 +1,8 @@
 features:
+  basicAuth: true
   oidcAuth: true
   defaultBucket: true
-  
+
 image:
   tag: latest
   repository: image-registry.openshift-image-registry.svc:5000/df9936-tools
@@ -9,41 +10,18 @@ image:
 
 autoscaling:
   enabled: true
-  minReplicas: 1
-  maxReplicas: 3
-  behavior:
-    scaleDown:
-      stabilizationWindowSeconds: 120
-      selectPolicy: Max
-      policies:
-        - type: Pods
-          value: 1
-          periodSeconds: 120
-    scaleUp:
-      stabilizationWindowSeconds: 0
-      selectPolicy: Max
-      policies:
-        - type: Pods
-          value: 2
-          periodSeconds: 30
-  targetCPUUtilizationPercentage: 80
-
-resources:
-  limits:
-    cpu: 200m
-    memory: 512Mi
-  requests:
-    cpu: 50m
-    memory: 128Mi
+pdb:
+  enabled: true
 
 config:
   enabled: true
   releaseScoped: true
   configMap:
     BASICAUTH_ENABLED: "true"
+    S3ACCESSMODE_ENABLED: "true"
     DB_PORT: "5432"
     KC_ENABLED: "true"
-    KC_IDENTITYKEY: idir_user_guid,bceid_user_guid,github_id
+    KC_IDENTITYKEY: idir_user_guid,bceid_user_guid
     KC_PUBLICKEY: >-
       MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuy7zfh2ZgpDV5mH/aXyLDTddZK81rGakJcTy4KvCNOkDDxt1KAhW02lmbCo8YhHCOzjNZBp1+Vi6QiMRgBqAe2GTPZYEiV70aXfROGZe3Nvwcjbtki6HoyRte3SpqLJEIPL2F+hjJkw1UPGnjPTWZkEx9p74b9i3BjuE8RnjJ0Sza2MWw83zoQUZEJRGiopSL0yuVej6t2LO2btVdVf7QuZfPt9ehkcQYlPKpVvJA+pfeqPAdnNt7OjEIeYxinjurZr8Z04hz8UhkRefcWlSbFzFQYmL7O7iArjW0bsSvq8yNUd5r0KCOQkFduwZy26yTzTxj8OLFT91fEmbBBl4rQIDAQAB
     KC_REALM: standard
@@ -56,7 +34,21 @@ config:
     SERVER_PRIVACY_MASK: "true"
     SERVER_TEMP_EXPIRESIN: "300"
 
-patroni:
+# patroni:
+#   enabled: true
+#   replicaCount: 2
+#   resources:
+#     limits:
+#       cpu: 250m
+#       memory: 384Mi
+#     requests:
+#       cpu: 20m
+#       memory: 192Mi
+#   persistentVolume:
+#     enabled: true
+#     size: 128Mi
+
+postgres:
   enabled: true
   replicaCount: 2
   resources:
@@ -68,4 +60,54 @@ patroni:
       memory: 192Mi
   persistentVolume:
     enabled: true
-    size: 128Mi    
+    size: 128Mi
+
+  # --------------------------------
+  # --------crunchydb config: ------
+  # --------------------------------
+
+  # -------- backups ---------
+  pgBackRestConfig:
+    global:
+      # log-level-console: debug
+      # --- pvc
+      repo1-retention-full: "1"
+      repo1-retention-diff: "3"
+    repos:
+      - name: repo1
+        schedules:
+          full: "0 0 1 * *" # full backup at midnight every month
+          differential: "0 1 * * *" # differential every day at 1am
+        volume:
+          volumeClaimSpec:
+            accessModes:
+              - "ReadWriteOnce"
+            resources:
+              requests:
+                storage: 5Gi
+            storageClassName: "netapp-file-backup"
+    manual:
+      repoName: repo1
+      options:
+        - --type=full
+    repoHost:
+      resources:
+        requests:
+          cpu: 20m
+          memory: 128Mi
+    sidecars:
+      pgbackrest:
+        resources:
+          requests:
+            cpu: 5m
+            memory: 16Mi
+      pgbackrestConfig:
+        resources:
+          requests:
+            cpu: 5m
+            memory: 32Mi
+    jobs:
+      resources:
+        requests:
+          cpu: 10m
+          memory: 64Mi
