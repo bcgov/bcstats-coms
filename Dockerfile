@@ -11,9 +11,10 @@ RUN chown -R 1001:0 $HOME/.npm
 
 # Install Application
 COPY . ${APP_ROOT}
+RUN chown -R 1001:0 ${APP_ROOT}/app
 USER 1001
 WORKDIR ${APP_ROOT}/app
-RUN mkdir -p node_modules && npm ci --omit=dev
+RUN npm ci --omit=dev
 
 EXPOSE ${APP_PORT}
 CMD ["node", "./bin/www"]
