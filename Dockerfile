@@ -1,4 +1,4 @@
-FROM docker.io/node:20.15.1-alpine3.20
+FROM registry.access.redhat.com/ubi8/nodejs-20:latest
 
 ARG APP_ROOT=/opt/app-root/src
 ENV APP_PORT=8080 \
