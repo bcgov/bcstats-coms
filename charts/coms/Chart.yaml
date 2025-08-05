@@ -23,19 +23,14 @@ keywords:
   - access-control
   - object-storage
   - domo
-home: https://bcgov.github.io/common-object-management-service
 sources:
-  - https://github.com/bcgov/common-object-management-service
+  - https://github.com/bcgov/bcstats-coms
 dependencies:
   - name: postgrescluster
     version: 2.1.4
     repository: "file://../postgres"
     condition: postgres.enabled
     alias: postgres
-maintainers:
-  - name: NR Common Service Showcase Team
-    email: NR.CommonServiceShowcase@gov.bc.ca
-    url: https://bcgov.github.io/common-service-showcase/team.html
 # This is the version number of the application being deployed. This version number should be
 # incremented each time you make changes to the application. Versions are not expected to
 # follow Semantic Versioning. They should reflect the version the application is using.
