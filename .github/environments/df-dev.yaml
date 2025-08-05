@@ -15,7 +15,7 @@ pdb:
 
 config:
   enabled: true
-  releaseScoped: true
+  releaseScoped: false
   configMap:
     BASICAUTH_ENABLED: "true"
     S3ACCESSMODE_ENABLED: "true"
