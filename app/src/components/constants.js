@@ -38,14 +38,8 @@ module.exports = Object.freeze({
     maxAge: 600,
     /** Set true to dynamically set Access-Control-Allow-Origin based on Origin */
     origin: true,
-    /** Allow credentials to be included in cross-origin requests */
-    credentials: true,
     /** Configures the Access-Control-Expose-Headers CORS header */
     exposedHeaders: 'X-Total-Rows',
-    /** Allow specific headers in cross-origin requests */
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
-    /** Allow specific HTTP methods */
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'HEAD', 'PATCH']
   },
 
   /** Need to specify valid AWS region or it'll explode ('us-east-1' is default, 'ca-central-1' for Canada) */
