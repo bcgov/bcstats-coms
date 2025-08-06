@@ -33,6 +33,8 @@ let queueId;
 const app = express();
 app.use(compression());
 app.use(cors(DEFAULTCORS));
+app.options('*', cors(DEFAULTCORS)); // Enable preflight for all routes
+
 app.use(express.urlencoded({ extended: true }));
 app.use(helmet());
 
