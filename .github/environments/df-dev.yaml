@@ -44,7 +44,7 @@ postgres:
           - "ReadWriteOnce"
         resources:
           requests:
-            storage: 1.46Gi
+            storage: 1Gi
         storageClassName: "netapp-block-standard"
       resources:
         requests:
