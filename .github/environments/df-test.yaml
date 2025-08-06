@@ -34,33 +34,31 @@ config:
     SERVER_PRIVACY_MASK: "true"
     SERVER_TEMP_EXPIRESIN: "300"
 
-# patroni:
-#   enabled: true
-#   replicaCount: 2
-#   resources:
-#     limits:
-#       cpu: 250m
-#       memory: 384Mi
-#     requests:
-#       cpu: 20m
-#       memory: 192Mi
-#   persistentVolume:
-#     enabled: true
-#     size: 128Mi
-
 postgres:
   enabled: true
-  replicaCount: 2
-  resources:
-    limits:
-      cpu: 250m
-      memory: 384Mi
-    requests:
-      cpu: 20m
-      memory: 192Mi
-  persistentVolume:
-    enabled: true
-    size: 128Mi
+  instances:
+    - name: db # do not change this name after initial install, pvc (data) and stateful sets will be deleted
+      replicas: 2
+      dataVolumeClaimSpec:
+        accessModes:
+          - "ReadWriteOnce"
+        resources:
+          requests:
+            storage: 1.83Gi
+        storageClassName: "netapp-block-standard"
+      resources:
+        requests:
+          cpu: 20m
+          memory: 192Mi
+        limits:
+          cpu: 250m
+          memory: 384Mi
+      sidecars:
+        replicaCertCopy:
+          resources:
+            requests:
+              cpu: 25m
+              memory: 50Mi
 
   # --------------------------------
   # --------crunchydb config: ------
@@ -84,7 +82,7 @@ postgres:
               - "ReadWriteOnce"
             resources:
               requests:
-                storage: 5Gi
+                storage: 128Mi
             storageClassName: "netapp-file-backup"
     manual:
       repoName: repo1
