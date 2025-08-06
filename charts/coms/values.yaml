@@ -222,7 +222,7 @@ postgres:
 
   # ------- postgres user/db configuration ----------
   users:
-    - name: bcstats-coms
+    - name: app
       databases:
         - app
   # Custom SQL commands we want to run, that get added to a ConfigMap
