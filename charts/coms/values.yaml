@@ -138,7 +138,7 @@ config:
     # DB_POOL_MAX: "10"
 
     # KC_ENABLED: "true"
-    KC_IDENTITYKEY: idir_user_guid,bceid_user_guid,github_id
+    KC_IDENTITYKEY: idir_user_guid,bceid_user_guid
     KC_PUBLICKEY: ~
     KC_REALM: ~
     KC_SERVERURL: ~
