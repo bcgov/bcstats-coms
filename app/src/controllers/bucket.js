@@ -78,8 +78,8 @@ const controller = {
    */
   async _validateCredentials(credentials) {
     if (credentials.adminPass != config.get('server.adminpass')) {
-      throw new Problem(409, {
-        details: 'Failure validating admin password',
+      throw new Problem(400, {
+        details: 'Failure validating administrator password',
       });
     }
 
