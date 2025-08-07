@@ -180,7 +180,8 @@ const controller = {
       secretAccessKey: parentBucket.secretAccessKey,
       region: parentBucket.region ?? undefined,
       active: parentBucket.active,
-      permCodes: []
+      permCodes: [],
+      adminPass: req.body.adminPass
     };
 
     let response = undefined;
