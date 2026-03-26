@@ -60,5 +60,8 @@
     "jest-joi": "^1.1.17",
     "nodemon": "^3.0.1",
     "supertest": "^6.3.3"
-  }
+  },
+	"overrides": {
+	"fast-xml-parser": "^4.5.4"
+	}
 }
